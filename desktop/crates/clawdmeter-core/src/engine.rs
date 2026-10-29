@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, TimeZone, Utc};
 
+use crate::agents::{AgentEvent, Agents};
 use crate::attention::{Alert, AttentionState};
 use crate::backoff::SavedBlock;
 use crate::cadence::{heartbeat_due, AccountClock, Cadence, PollReason, Scheduler};
@@ -24,6 +25,11 @@ pub const ACTIVITY_MIN_INTERVAL: i64 = 5;
 /// `e`/`es` ride along for this long after the event (s), so a device that
 /// reconnects or reboots later doesn't react to an old event.
 pub const EVENT_FRESH_SECS: i64 = 60;
+/// Agents writes go out at most this often when the list changes (s).
+pub const AGENTS_MIN_INTERVAL: i64 = 1;
+/// While sessions are listed, the agents write is repeated this often (s), so
+/// running agents' seconds move on and a reconnected device catches up.
+pub const AGENTS_REFRESH_SECS: i64 = 60;
 
 /// Why a write happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +44,9 @@ pub enum WriteKind {
     Heartbeat,
     /// Every account is logged out: `{"ok":false}`.
     NoData,
+    /// Sessions and subagents alone (`{"ag":…}`, no `ok`): the device's
+    /// Agentes page. Doesn't count as a usage write (no heartbeat reset).
+    Agents,
 }
 
 /// A write the runtime should perform.
@@ -152,6 +161,13 @@ pub struct Engine {
     claude_found: bool,
     /// A new alert should chime on this computer (`desktop_chime`).
     desktop_chime_due: bool,
+    /// Sessions and subagents (`ag`).
+    agents: Agents,
+    /// The agents list the device last got (its change key), and when.
+    sent_ag: Option<String>,
+    sent_ag_at: i64,
+    /// The key of the agents write handed out by `next_write`.
+    pending_ag: Option<String>,
 }
 
 fn utc(now: i64) -> DateTime<Utc> {
@@ -187,6 +203,10 @@ impl Engine {
             unattributed_activity: None,
             claude_found: true,
             desktop_chime_due: false,
+            agents: Agents::default(),
+            sent_ag: None,
+            sent_ag_at: i64::MIN / 2,
+            pending_ag: None,
         }
     }
 
@@ -216,6 +236,11 @@ impl Engine {
     /// History from events.log at start-up (no `e` is emitted for it).
     pub fn seed_events(&mut self, events: &[HookEvent]) {
         self.activity.seed(events);
+    }
+
+    /// One agents.log line (history at start-up, then live).
+    pub fn on_agent_event(&mut self, ev: &AgentEvent) {
+        self.agents.ingest(ev);
     }
 
     /// One live hook event.
@@ -280,6 +305,8 @@ impl Engine {
         self.sent_lv = None;
         self.sent_aa = None;
         self.sent_pm = None;
+        self.sent_ag = None;
+        self.sent_ag_at = i64::MIN / 2;
         if self.active.is_some() || self.logged_out {
             self.fresh_poll = true;
         }
@@ -451,8 +478,35 @@ impl Engine {
     }
 
     /// The next write, if one is due. Call [`Engine::mark_written`] after a
-    /// successful write; on failure just call this again next tick.
+    /// successful write; on failure just call this again next tick. Usage
+    /// writes come first; the agents write takes a tick of its own.
     pub fn next_write(&mut self, now: i64, host: HostClock) -> Option<Write> {
+        let w = self.usage_write(now, host);
+        w.or_else(|| self.agents_write(now))
+    }
+
+    /// `{"ag":…}` when the list changed (at most once a second), and every
+    /// [`AGENTS_REFRESH_SECS`] while anything is listed. An empty list goes
+    /// out only to clear one the device has, so without sessions (or without
+    /// the subagent hooks) the writes are exactly as before.
+    fn agents_write(&mut self, now: i64) -> Option<Write> {
+        self.agents.prune(now);
+        if self.agents.is_empty() && self.sent_ag.as_deref().is_none_or(|k| k == "[]") {
+            return None;
+        }
+        let (ag, key) = self.agents.build(now);
+        let changed = self.sent_ag.as_ref() != Some(&key);
+        let since = now - self.sent_ag_at;
+        let due =
+            (changed && since >= AGENTS_MIN_INTERVAL) || (!self.agents.is_empty() && since >= AGENTS_REFRESH_SECS);
+        if !due {
+            return None;
+        }
+        self.pending_ag = Some(key);
+        Some(Write { payload: Payload::agents(ag), kind: WriteKind::Agents })
+    }
+
+    fn usage_write(&mut self, now: i64, host: HostClock) -> Option<Write> {
         self.activity.prune(now);
         let level = self.activity.level(now);
         let sessions = self.activity.sessions_active(now);
@@ -530,6 +584,11 @@ impl Engine {
 
     /// The write from [`Engine::next_write`] reached the device.
     pub fn mark_written(&mut self, now: i64, w: &Write) {
+        if w.kind == WriteKind::Agents {
+            self.sent_ag = self.pending_ag.take();
+            self.sent_ag_at = now;
+            return;
+        }
         self.last_write = Some(now);
         self.fresh_poll = false;
         if w.payload.b.is_some() || w.payload.m.is_some() || w.payload.x.is_some() || self.attention.pending() {
@@ -907,6 +966,49 @@ mod tests {
         // Old events stop riding along after a minute.
         let w = e.next_write(T0 + 200, HostClock::default()).unwrap();
         assert_eq!((w.payload.e, w.payload.es), (None, None));
+    }
+
+    #[test]
+    fn agents_go_out_on_change_and_periodically() {
+        let mut e = Engine::new(settings(""));
+        let ag = |ts, event: &str, ty: Option<&str>| AgentEvent {
+            ts,
+            event: event.into(),
+            session: "s1".into(),
+            project: Some("Clawdmeter".into()),
+            id: ty.map(|_| "a1".into()),
+            agent_type: ty.map(Into::into),
+            task: None,
+        };
+        assert!(write(&mut e, T0).is_none(), "no hooks, no data: nothing");
+        e.on_hook_event(&ev(T0, "UserPromptSubmit"), T0);
+        e.on_agent_event(&ag(T0, "UserPromptSubmit", None));
+        // Before the first poll only the agents write can go.
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!(w.kind, WriteKind::Agents);
+        assert_eq!(w.payload.to_json(), r#"{"ag":[["Clawdmeter",1,[]]]}"#);
+        assert!(write(&mut e, T0).is_none());
+        // Usage first; the agents change waits for the next tick.
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        e.on_agent_event(&ag(T0, "SubagentStart", Some("Explore")));
+        assert_eq!(write(&mut e, T0).unwrap().kind, WriteKind::Poll);
+        assert!(write(&mut e, T0).is_none(), "at most once a second");
+        let w = write(&mut e, T0 + 1).unwrap();
+        assert_eq!(w.payload.to_json(), r#"{"ag":[["Clawdmeter",2,[["Explore","",1,1]]]]}"#);
+        // Running seconds alone aren't a change; the minute refresh carries them.
+        assert!(write(&mut e, T0 + 30).is_none());
+        let w = write(&mut e, T0 + 61).unwrap();
+        assert_eq!(w.kind, WriteKind::Heartbeat, "the agents write didn't reset the heartbeat");
+        let w = write(&mut e, T0 + 61).unwrap();
+        assert_eq!(w.payload.to_json(), r#"{"ag":[["Clawdmeter",2,[["Explore","",61,1]]]]}"#);
+        // Reconnect: sent again.
+        e.on_connected();
+        assert_eq!(write(&mut e, T0 + 62).unwrap().kind, WriteKind::Poll);
+        assert_eq!(write(&mut e, T0 + 62).unwrap().kind, WriteKind::Agents);
+        // The session ends: one empty list, then quiet.
+        e.on_agent_event(&ag(T0 + 70, "SessionEnd", None));
+        assert_eq!(write(&mut e, T0 + 70).unwrap().payload.to_json(), r#"{"ag":[]}"#);
+        assert!(write(&mut e, T0 + 200).map(|w| w.kind) != Some(WriteKind::Agents));
     }
 
     #[test]

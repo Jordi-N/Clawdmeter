@@ -92,10 +92,13 @@ pub const SEED_BYTES: u64 = 64 * 1024;
 
 /// Follows events.log by byte offset. The hook rolls the log to
 /// `events.log.1` past ~256 KB (`mv -f`); when that happens the unread tail of
-/// the old file is drained from `.1` before following the new one.
+/// the old file is drained from `.1` before following the new one. `T` is
+/// what a line parses to: [`HookEvent`] for events.log, other logs bring their
+/// own parser ([`EventTail::open_with`]).
 #[derive(Debug)]
-pub struct EventTail {
+pub struct EventTail<T = HookEvent> {
     path: PathBuf,
+    parse: fn(&str) -> Option<T>,
     offset: u64,
     partial: String,
     ident: FileIdent,
@@ -144,10 +147,17 @@ fn inode(_m: &fs::Metadata) -> Option<u64> {
     None
 }
 
-impl EventTail {
+impl EventTail<HookEvent> {
     /// Start at the end of the file. Returns the tail plus the last
     /// [`SEED_BYTES`] of history for [`Activity::seed`].
     pub fn open(path: impl Into<PathBuf>) -> (Self, Vec<HookEvent>) {
+        Self::open_with(path, parse_line)
+    }
+}
+
+impl<T> EventTail<T> {
+    /// [`EventTail::open`] for a log whose lines `parse` reads.
+    pub fn open_with(path: impl Into<PathBuf>, parse: fn(&str) -> Option<T>) -> (Self, Vec<T>) {
         let path = path.into();
         let meta = fs::metadata(&path).ok();
         let len = meta.as_ref().map_or(0, |m| m.len());
@@ -155,12 +165,12 @@ impl EventTail {
             .map(|s| {
                 // Drop a partial first line when we started mid-file.
                 let s = if len > SEED_BYTES { s.split_once('\n').map_or("", |x| x.1).to_owned() } else { s };
-                s.lines().filter_map(parse_line).collect()
+                s.lines().filter_map(parse).collect()
             })
             .unwrap_or_default();
         let inodes = cfg!(unix);
         let ident = meta.as_ref().map(|m| FileIdent::of(&path, m, inodes)).unwrap_or_default();
-        (EventTail { path, offset: len, partial: String::new(), ident, inodes }, seed)
+        (EventTail { path, parse, offset: len, partial: String::new(), ident, inodes }, seed)
     }
 
     /// True when the log (or its rolled copy) exists: the hooks are installed.
@@ -175,7 +185,7 @@ impl EventTail {
     }
 
     /// New complete lines since the last call.
-    pub fn poll(&mut self) -> Vec<HookEvent> {
+    pub fn poll(&mut self) -> Vec<T> {
         let mut out = Vec::new();
         let Ok(meta) = fs::metadata(&self.path) else {
             // Rolled and not recreated yet: finish the old file.
@@ -208,7 +218,7 @@ impl EventTail {
 
     /// Read what's left of the rolled file past our offset, if it is the file
     /// we were following (same identity, at least as long as what we read).
-    fn drain_rolled(&mut self, out: &mut Vec<HookEvent>) {
+    fn drain_rolled(&mut self, out: &mut Vec<T>) {
         let rolled = self.rolled();
         if let Ok(meta) = fs::metadata(&rolled) {
             let len = meta.len();
@@ -222,11 +232,11 @@ impl EventTail {
         self.partial.clear();
     }
 
-    fn consume(&mut self, chunk: &str, out: &mut Vec<HookEvent>) {
+    fn consume(&mut self, chunk: &str, out: &mut Vec<T>) {
         self.partial.push_str(chunk);
         while let Some(i) = self.partial.find('\n') {
             let line: String = self.partial.drain(..=i).collect();
-            if let Some(ev) = parse_line(line.trim_end()) {
+            if let Some(ev) = (self.parse)(line.trim_end()) {
                 out.push(ev);
             }
         }

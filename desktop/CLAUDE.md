@@ -62,7 +62,8 @@ is faked behind `FlashHardware`.
   `CLAUDE_CONFIG_DIR` (default account), `CLAWDMETER_BLE_ADDRESS`,
   `CLAWDMETER_DECORATIONS`.
 - State lives in one dir, `~/.config/clawdmeter/` (Windows:
-  `%LOCALAPPDATA%\Clawdmeter\`): `config`, `events.log`, `attention`,
+  `%LOCALAPPDATA%\Clawdmeter\`): `config`, `events.log`, `agents.log` (subagents for the device's `ag`),
+  `attention`,
   `clear-<sid>`, `ble-address`, `daemon.log`, `usage-blocks.json`, app
   state and locks.
 - Config keys: `config_dirs`, `poll_interval`, `heartbeat_interval`,

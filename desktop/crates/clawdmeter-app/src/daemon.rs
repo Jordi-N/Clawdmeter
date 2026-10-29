@@ -12,6 +12,7 @@ use clawdmeter_ble::{
     should_wake, AddressCache, Bluetooth, DeviceEvent, DeviceEvents, DeviceLink, LinkError, LinkOptions, Reconnect,
     Sighting, MAX_WRITE,
 };
+use clawdmeter_core::agents;
 use clawdmeter_core::attention::AttentionInbox;
 use clawdmeter_core::backoff;
 use clawdmeter_core::engine::PollPlan;
@@ -151,6 +152,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let (mut tail, seed) = EventTail::open(paths.events_log());
     engine.seed_events(&seed);
     engine.set_hooks_installed(tail.exists());
+    let (mut agents_tail, agents_seed) = EventTail::open_with(paths.agents_log(), agents::parse_line);
+    for ev in &agents_seed {
+        engine.on_agent_event(ev);
+    }
     let cache = AddressCache::new(paths.ble_address_file());
     let link_opts = LinkOptions::default();
 
@@ -244,6 +249,9 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             engine.on_hook_event(&ev, now);
         }
         engine.set_hooks_installed(tail.exists());
+        for ev in agents_tail.poll() {
+            engine.on_agent_event(&ev);
+        }
         let alert = inbox.take_alert(SystemTime::now());
         let clears = inbox.take_clears();
         if alert.is_some() || !clears.is_empty() {
@@ -375,6 +383,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     WriteKind::Attention => "Attention",
                     WriteKind::Event => "Event",
                     WriteKind::NoData => "No data",
+                    WriteKind::Agents => "Agents",
                 };
                 log::info!("{label}: {}", String::from_utf8_lossy(&bytes));
                 match l.write(&bytes).await {

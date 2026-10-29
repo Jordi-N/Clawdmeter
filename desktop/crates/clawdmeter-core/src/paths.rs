@@ -55,6 +55,12 @@ impl Paths {
         self.state_dir.join("events.log")
     }
 
+    /// `agents.log`, appended by the hook next to events.log: one JSON
+    /// [`crate::agents::AgentEvent`] per line, for the device's Agentes page.
+    pub fn agents_log(&self) -> PathBuf {
+        self.state_dir.join("agents.log")
+    }
+
     /// The attention alert file (`{"m": message, "s": session id}`).
     pub fn attention_file(&self) -> PathBuf {
         self.state_dir.join("attention")

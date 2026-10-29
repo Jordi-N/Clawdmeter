@@ -10,10 +10,14 @@
 //!   turned off, see [`clawdmeter_core::attention::AlertKind`]);
 //! * `clear` touches `clear-<session id>`;
 //! * `event` appends `<unix_ts> <hook_event_name> <session_id>` to
-//!   `events.log`, rolling it to `events.log.1` past 256 KB.
+//!   `events.log`, rolling it to `events.log.1` past 256 KB, and one JSON
+//!   line to `agents.log` (same rolling) for the device's Agentes page
+//!   ([`agent_line`]).
 //!
-//! `alert event` / `clear event` do both from one read of stdin. Only the
-//! event name and session id are recorded, never the prompt or the tool call.
+//! `alert event` / `clear event` do both from one read of stdin. events.log
+//! records only the event name and session id, never the prompt or the tool
+//! call; agents.log adds the project folder's name and, for subagents, their
+//! id, type and the Agent tool's short `description` (clipped to 24 chars).
 //! Hook stdout can reach the model, so the hook prints nothing and always
 //! exits 0. The file formats match the legacy `attention-hook.sh` byte for
 //! byte apart from the alert's `k`, which older readers ignore.
@@ -25,6 +29,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::SystemTime;
 
+use clawdmeter_core::agents::{self, AgentEvent};
 use clawdmeter_core::attention::AlertKind;
 use serde_json::{Map, Value};
 
@@ -138,11 +143,58 @@ pub fn event_line(v: &Value, now_unix: u64) -> Option<String> {
     })
 }
 
+/// The agents.log line for one hook input: event, session, the project
+/// folder (last part of `cwd`), and what the Agentes page needs about
+/// subagents. `None` without an event name or a session id.
+pub fn agent_line(v: &Value, now_unix: u64) -> Option<String> {
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+    let event = text(v, "hook_event_name")?;
+    let mut ev = AgentEvent {
+        ts: now_unix as i64,
+        session: agents::clip(&text(v, "session_id")?, 128),
+        project: text(v, "cwd").and_then(|c| {
+            c.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|n| !n.is_empty())
+                .map(|n| agents::clip(n, 64))
+        }),
+        id: None,
+        agent_type: None,
+        task: None,
+        event: agents::clip(&event, 64),
+    };
+    match event.as_str() {
+        "SubagentStart" | "SubagentStop" => {
+            ev.id = text(v, "agent_id").map(|s| agents::clip(&s, 128));
+            ev.agent_type = text(v, "agent_type").map(|s| agents::clip(&s, 64));
+        }
+        // The subagent tool: `Agent`, called `Task` by older Claude Code.
+        "PreToolUse" if matches!(v.get("tool_name").and_then(Value::as_str), Some("Agent" | "Task")) => {
+            let input = v.get("tool_input").cloned().unwrap_or(Value::Null);
+            // Claude Code runs a general-purpose agent when no type is given.
+            ev.agent_type = Some(agents::clip(&text(&input, "subagent_type").unwrap_or("general-purpose".into()), 64));
+            ev.task = Some(agents::clip(&text(&input, "description").unwrap_or_default(), agents::TASK_CHARS));
+        }
+        _ => {}
+    }
+    Some(ev.to_line())
+}
+
 fn log_event(v: &Value, dir: &Path, now_unix: u64) -> io::Result<()> {
+    if let Some(line) = agent_line(v, now_unix) {
+        let _ = append_rolled(dir, "agents.log", &line);
+    }
     let Some(line) = event_line(v, now_unix) else { return Ok(()) };
-    let f = dir.join("events.log");
+    append_rolled(dir, "events.log", &line)
+}
+
+/// Append one line to `dir/name`, rolling it to `name.1` past
+/// [`EVENTS_ROLL_BYTES`].
+fn append_rolled(dir: &Path, name: &str, line: &str) -> io::Result<()> {
+    let f = dir.join(name);
     if fs::metadata(&f).is_ok_and(|m| m.is_file() && m.len() > EVENTS_ROLL_BYTES) {
-        let _ = fs::rename(&f, dir.join("events.log.1"));
+        let _ = fs::rename(&f, dir.join(format!("{name}.1")));
     }
     // One write call: concurrent hooks append whole lines (O_APPEND).
     OpenOptions::new().create(true).append(true).open(&f)?.write_all(line.as_bytes())
@@ -289,6 +341,123 @@ mod tests {
     }
 
     #[test]
+    fn agent_lines() {
+        let parse = |v: Value| agents::parse_line(agent_line(&v, 7).unwrap().trim_end()).unwrap();
+        // Doc-shaped inputs (code.claude.com/docs/en/hooks).
+        let pre = parse(
+            json!({"session_id": "abc123", "cwd": "/home/user/my-project", "hook_event_name": "PreToolUse",
+            "tool_name": "Agent", "tool_use_id": "toolu_01",
+            "tool_input": {"prompt": "Find all API endpoints", "description": "Find API endpoints and list them all", "subagent_type": "Explore"}}),
+        );
+        assert_eq!(
+            (
+                pre.event.as_str(),
+                pre.session.as_str(),
+                pre.project.as_deref(),
+                pre.agent_type.as_deref(),
+                pre.task.as_deref()
+            ),
+            ("PreToolUse", "abc123", Some("my-project"), Some("Explore"), Some("Find API endpoints and l"))
+        );
+        let start =
+            parse(json!({"session_id": "abc123", "cwd": "C:\\Users\\me\\Proj\\", "hook_event_name": "SubagentStart",
+            "agent_id": "agent-abc123", "agent_type": "Explore"}));
+        assert_eq!((start.project.as_deref(), start.id.as_deref()), (Some("Proj"), Some("agent-abc123")));
+        let old =
+            parse(json!({"session_id": "s", "hook_event_name": "PreToolUse", "tool_name": "Task", "tool_input": {}}));
+        assert_eq!(
+            (old.agent_type.as_deref(), old.task.as_deref(), old.project),
+            (Some("general-purpose"), Some(""), None)
+        );
+        // Other tools and events: no agent fields, and never the prompt.
+        let ask = agent_line(
+            &json!({"session_id": "s", "hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion",
+            "tool_input": {"description": "secret"}}),
+            7,
+        )
+        .unwrap();
+        assert_eq!(ask, "{\"t\":7,\"e\":\"PreToolUse\",\"s\":\"s\"}\n");
+        let prompt = agent_line(
+            &json!({"session_id": "s", "hook_event_name": "UserPromptSubmit", "prompt": "secret", "cwd": "/"}),
+            7,
+        );
+        assert_eq!(prompt.unwrap(), "{\"t\":7,\"e\":\"UserPromptSubmit\",\"s\":\"s\"}\n");
+        for bad in [json!({}), json!({"hook_event_name": "Stop"}), json!({"session_id": "s"}), json!([1]), Value::Null]
+        {
+            assert_eq!(agent_line(&bad, 7), None, "{bad}");
+        }
+    }
+
+    /// Hook inputs shaped like the docs' examples, through the hook into
+    /// agents.log, back out through the tail and tracker as the `ag` write.
+    #[test]
+    fn hook_inputs_to_the_ag_write() {
+        let d = dir("ag");
+        let hook = |mode: &str, v: Value, ts| run(Mode::parse(&args(mode)), &v.to_string(), &d, ts);
+        let base = |e: &str| {
+            json!({"session_id": "abc123", "cwd": "/home/user/Clawdmeter", "hook_event_name": e,
+            "transcript_path": "/home/user/.claude/projects/p/abc123.jsonl"})
+        };
+        let with = |e: &str, extra: Value| {
+            let mut v = base(e);
+            v.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            v
+        };
+        hook("clear event", base("UserPromptSubmit"), 1000);
+        hook(
+            "event",
+            with(
+                "PreToolUse",
+                json!({"tool_name": "Agent", "tool_use_id": "toolu_1",
+            "tool_input": {"prompt": "…", "description": "Find API endpoints", "subagent_type": "Explore"}}),
+            ),
+            1001,
+        );
+        hook("event", with("SubagentStart", json!({"agent_id": "agent-1", "agent_type": "Explore"})), 1001);
+        hook(
+            "event",
+            with(
+                "PreToolUse",
+                json!({"tool_name": "Agent",
+            "tool_input": {"description": "Write the tests", "subagent_type": "general-purpose"}}),
+            ),
+            1002,
+        );
+        hook("event", with("SubagentStart", json!({"agent_id": "agent-2", "agent_type": "general-purpose"})), 1002);
+        hook("clear event", with("PostToolUse", json!({"agent_id": "agent-1", "agent_type": "Explore"})), 1010);
+        hook(
+            "event",
+            with(
+                "SubagentStop",
+                json!({"agent_id": "agent-1", "agent_type": "Explore",
+            "last_assistant_message": "secret"}),
+            ),
+            1062,
+        );
+        let mut other = base("UserPromptSubmit");
+        other["session_id"] = json!("s2");
+        other["cwd"] = json!("/home/user/Docs");
+        hook("clear event", other.clone(), 1003);
+        other["hook_event_name"] = json!("Stop");
+        hook("event", other, 1004);
+        let (_, seed) = clawdmeter_core::events::EventTail::open_with(d.join("agents.log"), agents::parse_line);
+        assert_eq!(seed.len(), 9);
+        let mut tracker = agents::Agents::default();
+        seed.iter().for_each(|e| tracker.ingest(e));
+        let w = clawdmeter_core::Payload::agents(tracker.build(1100).0).to_json();
+        eprintln!("{w}");
+        assert_eq!(
+            w,
+            r#"{"ag":[["Clawdmeter",2,[["Explore","Find API endpoints",61,0],["general-purpos","Write the tests",98,1]]],["Docs",0,[]]]}"#
+        );
+        assert!(!fs::read_to_string(d.join("agents.log")).unwrap().contains("secret"));
+        // events.log keeps its format; the new events are just more names.
+        let log = fs::read_to_string(d.join("events.log")).unwrap();
+        assert!(log.contains("1001 SubagentStart abc123 /home/user/.claude\n"), "{log}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn alert_bodies() {
         let n = json!({"message": "Claude needs your permission", "session_id": "s1"});
         assert_eq!(
@@ -336,6 +505,10 @@ mod tests {
             "{\"k\":\"permission\",\"m\":\"Waiting\",\"s\":\"s1\"}\n"
         );
         assert_eq!(fs::read_to_string(d.join("events.log")).unwrap(), "100 Notification s1\n");
+        assert_eq!(
+            fs::read_to_string(d.join("agents.log")).unwrap(),
+            "{\"t\":100,\"e\":\"Notification\",\"s\":\"s1\"}\n"
+        );
         run(Mode::parse(&args("clear event")), r#"{"hook_event_name":"PostToolUse","session_id":"s1"}"#, &d, 101);
         assert!(d.join("clear-s1").is_file());
         assert_eq!(fs::read_to_string(d.join("events.log")).unwrap().lines().count(), 2);
@@ -429,6 +602,8 @@ mod tests {
                             .map(|e| e.file_name().to_string_lossy().into_owned())
                             // The script leaves attention.<pid> behind when jq fails.
                             .filter(|n| !n.starts_with("attention."))
+                            // The script predates agents.log.
+                            .filter(|n| !n.starts_with("agents.log"))
                             .map(|n| {
                                 let body = unkinded(fs::read_to_string(d.join(&n)).unwrap_or_default());
                                 let body = body

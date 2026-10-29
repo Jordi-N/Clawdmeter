@@ -98,6 +98,13 @@ notification message or the first question from `AskUserQuestion`, which
 is sent to the device. Prompt text and full tool-call payloads are not
 written to the event log.
 
+The subagent hooks (`SubagentStart`, `SubagentStop`, `SessionEnd`, and
+`PreToolUse` on the `Agent`/`Task` tool) fill the device's Agentes page (this
+fork's firmware): a second log, `agents.log`, adds each session's project
+folder name and, for subagents, their type and the short task description
+Claude gives them (at most 24 characters). Installs from before these hooks
+show as partial on the Hooks page until updated.
+
 Usage meters work without hooks. Use **Send a test alert** to check the
 app-to-device alert path; it does not test whether Claude Code invoked a hook.
 

@@ -92,12 +92,17 @@ pub struct Payload {
     /// value it got.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm: Option<u8>,
+    /// Fork only: Claude Code sessions and their subagents for the device's
+    /// Agentes page ([`crate::agents`]). Alone (see [`Payload::agents`]) it is
+    /// written without `ok`, which the firmware reads as agents-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ag: Option<serde_json::Value>,
 }
 
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es", "n",
-    "rp", "lv", "aa", "pm",
+    "rp", "lv", "aa", "pm", "ag",
 ];
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
@@ -261,6 +266,16 @@ impl Payload {
         Payload { ok: false, ..Default::default() }
     }
 
+    /// An agents-only write: `{"ag":…}` and nothing else, so the device
+    /// leaves its usage readings alone.
+    pub fn agents(ag: serde_json::Value) -> Self {
+        Payload { ag: Some(ag), ..Default::default() }
+    }
+
+    fn is_agents_only(&self) -> bool {
+        self.ag.is_some() && *self == Payload::agents(self.ag.clone().unwrap_or_default())
+    }
+
     /// Age a payload by `secs` like the bash daemon's `age_payload`: positive
     /// `sr`/`wr` tick down by whole minutes (clamped at 0) and `t` advances.
     pub fn aged(&self, secs: i64) -> Self {
@@ -281,6 +296,10 @@ impl Payload {
 
     /// Compact JSON.
     pub fn to_json(&self) -> String {
+        if self.is_agents_only() {
+            // No `ok`: an `"ok":false` here would read as "no data".
+            return serde_json::json!({ "ag": self.ag }).to_string();
+        }
         serde_json::to_string(self).expect("payload serializes")
     }
 
@@ -465,6 +484,16 @@ mod tests {
         assert_eq!(clock_fields(ClockMode::H24, now, 0, true).unwrap().hour_format, 24);
     }
 
+    #[test]
+    fn agents_only_has_no_ok() {
+        let ag = serde_json::json!([["Docs", 0, []]]);
+        assert_eq!(Payload::agents(ag.clone()).to_json(), r#"{"ag":[["Docs",0,[]]]}"#);
+        // Riding along with usage it is just another key.
+        let both = Payload { s: Some(4), ok: true, ag: Some(ag), ..Default::default() };
+        assert_eq!(both.to_json(), r#"{"s":4,"ok":true,"ag":[["Docs",0,[]]]}"#);
+        assert_eq!(Payload::no_data().to_json(), r#"{"ok":false}"#);
+    }
+
     // Ported from the legacy daemon test test_attention.py::test_encode_payload_fits.
     #[test]
     fn encode_fits() {
@@ -508,6 +537,7 @@ mod tests {
             lv: Some(3),
             aa: Some(120),
             pm: Some(1),
+            ag: Some(serde_json::json!([])),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();
         // serde_json's Map is sorted without preserve_order; check membership.

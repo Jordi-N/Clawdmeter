@@ -24,19 +24,26 @@ pub const LEGACY_SCRIPT: &str = "attention-hook.sh";
 pub struct HookSpec {
     /// Hook event name.
     pub event: &'static str,
-    /// Tool matcher (PreToolUse only).
+    /// Matcher: the tool for PreToolUse. Two specs on one event need
+    /// different matchers; [`merge`] keeps each in its own group.
     pub matcher: Option<&'static str>,
     /// Arguments after `hook`.
     pub args: &'static str,
 }
 
-/// The five hooks: the attention card's four plus Stop, all logging events.
-pub const HOOKS: [HookSpec; 5] = [
+/// The hooks: the attention card's four plus Stop, all logging events, and the
+/// subagent ones for the device's Agentes page (the subagent tool is `Agent`,
+/// `Task` in older Claude Code).
+pub const HOOKS: [HookSpec; 9] = [
     HookSpec { event: "UserPromptSubmit", matcher: None, args: "clear event" },
     HookSpec { event: "PostToolUse", matcher: None, args: "clear event" },
     HookSpec { event: "Stop", matcher: None, args: "event" },
     HookSpec { event: "Notification", matcher: None, args: "alert event" },
     HookSpec { event: "PreToolUse", matcher: Some("AskUserQuestion"), args: "alert event" },
+    HookSpec { event: "PreToolUse", matcher: Some("Task|Agent"), args: "event" },
+    HookSpec { event: "SubagentStart", matcher: None, args: "event" },
+    HookSpec { event: "SubagentStop", matcher: None, args: "event" },
+    HookSpec { event: "SessionEnd", matcher: None, args: "event" },
 ];
 
 /// The binary hooks should run: the path that outlives this process (an
@@ -226,7 +233,14 @@ pub fn merge(text: Option<&str>, exe: &Path) -> Result<String, HookError> {
         let list = hooks.entry(spec.event).or_insert_with(|| Value::Array(Vec::new()));
         let list = list.as_array_mut().ok_or(HookError::Shape("a hook event isn't a list"))?;
         let mut placed = false;
+        // Groups that belong to another spec on the same event.
+        let sibling = |g: &Value| {
+            HOOKS.iter().any(|o| o.event == spec.event && o.matcher != spec.matcher && group_matcher(g) == o.matcher)
+        };
         for group in list.iter_mut() {
+            if sibling(group) {
+                continue;
+            }
             let Some(hs) = group.get("hooks").and_then(Value::as_array) else { continue };
             if !hs.iter().any(is_managed) {
                 continue;
@@ -317,7 +331,7 @@ pub fn remove(text: Option<&str>) -> Result<String, HookError> {
 pub enum HookStatus {
     /// None of our hooks.
     Missing,
-    /// All five, pointing at this binary.
+    /// All of them, pointing at this binary.
     Installed,
     /// Uses the old `attention-hook.sh` script.
     Legacy,
@@ -564,6 +578,11 @@ mod tests {
         let j = v(&out);
         assert_eq!(j["hooks"]["Stop"][0]["hooks"][0]["command"], format!("{EXE} hook event"));
         assert_eq!(j["hooks"]["PreToolUse"][0]["matcher"], "AskUserQuestion");
+        assert_eq!(j["hooks"]["PreToolUse"][1]["matcher"], "Task|Agent");
+        assert_eq!(j["hooks"]["PreToolUse"][1]["hooks"][0]["command"], format!("{EXE} hook event"));
+        for ev in ["SubagentStart", "SubagentStop", "SessionEnd"] {
+            assert_eq!(j["hooks"][ev][0]["hooks"][0]["command"], format!("{EXE} hook event"), "{ev}");
+        }
         assert_eq!(j["hooks"]["PostToolUse"][0]["hooks"][0]["type"], "command");
         assert_eq!(status(Some(&out), exe()), HookStatus::Installed);
         assert_eq!(status(None, exe()), HookStatus::Missing);
@@ -595,6 +614,7 @@ mod tests {
         assert_eq!(post[1]["hooks"][0]["command"], format!("{EXE} hook clear event"));
         assert_eq!(j["hooks"]["Notification"].as_array().unwrap().len(), 1);
         assert_eq!(j["hooks"]["PreToolUse"][0]["hooks"][0]["command"], format!("{EXE} hook alert event"));
+        assert_eq!(j["hooks"]["PreToolUse"].as_array().unwrap().len(), 2, "the subagent group added next to it");
         assert!(!out.contains(LEGACY_SCRIPT));
         assert_eq!(status(Some(&out), exe()), HookStatus::Installed);
     }
@@ -629,11 +649,40 @@ mod tests {
             {"type": "command", "command": "/x/attention-hook.sh alert"}]}]}}"#;
         let j = v(&merge(Some(before), exe()).unwrap());
         let pre = j["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre.len(), 2);
+        assert_eq!(pre.len(), 3);
         assert!(pre[0].get("matcher").is_none());
         assert_eq!(pre[0]["hooks"].as_array().unwrap().len(), 1);
         assert_eq!(pre[0]["hooks"][0]["command"], "audit-log");
         assert_eq!(pre[1]["matcher"], "AskUserQuestion");
+        assert_eq!(pre[2]["matcher"], "Task|Agent");
+    }
+
+    #[test]
+    fn an_install_from_before_the_subagent_hooks_is_partial_and_updates() {
+        // The previous five hooks: both PreToolUse groups must end up side by side.
+        let five = format!(
+            r#"{{"hooks": {{
+              "UserPromptSubmit": [{{"hooks": [{{"type": "command", "command": "{EXE} hook clear event"}}]}}],
+              "PostToolUse": [{{"hooks": [{{"type": "command", "command": "{EXE} hook clear event"}}]}}],
+              "Stop": [{{"hooks": [{{"type": "command", "command": "{EXE} hook event"}}]}}],
+              "Notification": [{{"hooks": [{{"type": "command", "command": "{EXE} hook alert event"}}]}}],
+              "PreToolUse": [{{"matcher": "AskUserQuestion", "hooks": [{{"type": "command", "command": "{EXE} hook alert event"}}]}}]}}}}"#
+        );
+        assert_eq!(status(Some(&five), exe()), HookStatus::Partial);
+        let out = merge(Some(&five), exe()).unwrap();
+        assert_eq!(status(Some(&out), exe()), HookStatus::Installed);
+        let j = v(&out);
+        let pre = j["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 2);
+        assert_eq!(
+            (&pre[0]["matcher"], &pre[0]["hooks"][0]["command"]),
+            (&json!("AskUserQuestion"), &json!(format!("{EXE} hook alert event")))
+        );
+        assert_eq!(
+            (&pre[1]["matcher"], &pre[1]["hooks"][0]["command"]),
+            (&json!("Task|Agent"), &json!(format!("{EXE} hook event")))
+        );
+        assert_eq!(merge(Some(&out), exe()).unwrap(), out, "idempotent");
     }
 
     #[test]
