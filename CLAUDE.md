@@ -5,6 +5,24 @@ A desk-side Claude Code usage monitor. ESP32-S3 / ESP32-C6 firmware
 desktop app (`desktop/`) reads usage, follows Claude Code hook events and
 writes them to the device over BLE.
 
+## This fork
+
+Personal fork of HermannBjorgvin/Clawdmeter (`origin` = Jordi-N/Clawdmeter,
+`upstream` = original). Goal: a nicer, Spanish UI for the target board, the
+Waveshare ESP32-S3-Touch-AMOLED-2.16 (`waveshare_amoled_216`). Personal use
+only (Anthropic fonts and mascot are unlicensed): never sold or redistributed.
+Talk to the owner in Spanish; show simulator captures and wait for approval
+before big changes. Board-specific tweaks stay isolated so other boards build.
+
+The simulator on this Windows machine runs in WSL Ubuntu: PlatformIO in
+`~/pio-venv`, build dir `~/clawd-build`.
+
+```bash
+cd /mnt/c/Users/JN/Documents/GitHub/Clawdmeter
+PLATFORMIO_BUILD_DIR=~/clawd-build ~/pio-venv/bin/pio run -d firmware -e sim
+cd firmware && SDL_VIDEODRIVER=dummy SIM_SHOTS="3000:/tmp/a.bmp" ~/clawd-build/sim/program
+```
+
 ## Repo map
 
 - `firmware/`: PlatformIO firmware. Read `firmware/CLAUDE.md`; each board's
@@ -102,76 +120,43 @@ Adding or renaming a key means changing both sides: `clawdmeter-core`'s
 
 ## Hard rules
 
+These keep the firmware working; the rest of upstream's policy doesn't apply
+to this fork.
+
 - **No `#ifdef BOARD_*` in shared firmware code.** Use `BoardCaps`, the HAL
-  or a per-board file.
-- **One Clawd on screen, ever** (`firmware/CLAUDE.md` gotcha 2).
+  or a per-board file, so other boards keep building.
+- **One Clawd on screen, ever** (`firmware/CLAUDE.md` gotcha 2;
+  `test/test_director` enforces it).
 - **No data is never a zero.** The firmware feeds only `ok && !rp` payloads to
   the rate math and reset detector; in the app a failed poll is never a 0 %
   reading.
-- **The usage probe must never start a 5-hour window** (owner's rule; how
-  `choose_source` enforces it is in `desktop/CLAUDE.md`).
+- **The usage probe must never start a 5-hour window** (how `choose_source`
+  enforces it is in `desktop/CLAUDE.md`).
 - **Tests never run a real `systemctl`, `launchctl` or `reg`** on the
   developer's machine.
-- **The chime is described only by its note and envelope** (C#5, 554.5 Hz,
-  attack/strike/ring) in code, docs, commits and PRs. Never name or hint at
-  what inspired it, and add no credit line for it.
-- **Clawd sprite art comes only from the official animations** in
-  `research/clawd-official/`; never draw or retouch sprite frames. The large
-  screensaver face is the exception: it's built from LVGL shapes and may be
-  embellished. Board illustrations are original SVGs, never copied photos.
-- **Check UI changes yourself** before handing over: the
-  `verifying-firmware-ui` and `capturing-desktop-screenshots` skills.
-  Simulator captures don't count as hardware testing.
-- Lint `.github/` changes with `actionlint` (and `shellcheck`) before pushing.
+- **Stay compatible with the official desktop app**: don't rename or remove
+  BLE keys. New keys are optional on both sides, with the firmware working
+  when they're absent.
+- **Check UI changes yourself** in the simulator before handing over
+  (`verifying-firmware-ui` skill). Simulator captures don't count as hardware
+  testing.
 
-## Pull requests
+Sprites may be edited or added. Put new or modified art in its own file
+rather than editing the generated `splash_animations.h`, so upstream merges
+don't conflict.
 
-Use `.github/pull_request_template.md` and write for a reviewer seeing the
-change for the first time.
+## Publishing
 
-- Describe the end state: behaviour, structure and file paths. Leave out the
-  session history, abandoned approaches and checks CI already gates. Keep it
-  proportional to the change.
-- Add screenshots or photos when UI or device output changes (device output:
-  the `capturing-device-screenshots` skill, or photos). Label simulator captures as such.
-  Add a Mermaid diagram when it clarifies flow, state or architecture.
-- **Hardware testing**: the exact boards and revisions tested on real
-  hardware and what was verified, or "not tested on hardware".
-- **Agent review**: before opening the PR, have a subagent on a frontier
-  model such as Opus review everything the PR will contain (committed and
-  uncommitted). Ask for findings with a concrete failure scenario, fix what
-  holds up, and re-run the review if the fixes change the diff substantially.
-  Then tick the template's box and list only the findings left unfixed, with
-  why. If no subagent review could run, leave the box unticked and say why.
-  It is not human review.
-- **Human involvement**: how much the human author reviewed and QA'd, e.g.
-  "Agent-written; human reviewed the diff and tested pairing and touch on an
-  ESP32-S3-Touch-AMOLED-2.16." If none, "not reviewed by a human". Report
-  only confirmed involvement; approval to proceed is not review.
-- A new board also needs its buy link and preferably a photo of it running
-  Clawdmeter (say if there is none). A marketplace link (Amazon, AliExpress)
-  is fine when the maker has no store of its own. Its SVG and catalog entries
-  are part of the port, not follow-up work.
-
-## CI
-
-Workflows in `.github/workflows/`:
-
-- `firmware.yml`: builds every hardware env plus merged images, runs native
-  tests, captures a headless sim screenshot, runs `tools/ci` unittests.
-- `desktop.yml`: fmt, clippy and workspace tests on Linux; core tests on
-  macOS and Windows.
-- `release.yml`: runs on `v*` tags; see the `cutting-a-release` skill.
+Commit to a feature branch and push to `origin` only when asked. Merge
+upstream with `git fetch upstream && git merge upstream/main`. Nothing goes
+back to upstream: no PRs.
 
 ## Skills
 
 Project skills in `.claude/skills/`:
 
-- `porting-a-board`: add a board end to end, including app, README, manifest and PR requirements.
 - `verifying-firmware-ui`: simulator screenshots and on-device `clawd <beat>` QA.
 - `capturing-device-screenshots`: a connected board's screen as a PNG (bundled `screenshot.py`).
 - `flashing-and-probing-boards`: flash a board and run serial commands (bundled `serial_cmd.py`).
-- `capturing-desktop-screenshots`: demo window screenshots under X11 (bundled `capture.sh`).
-- `cutting-a-release`: tags, what the release builds, pre-tag and packaging checks.
-- `regenerating-firmware-assets`: fonts, RGB565A8 icons, the Clawd animation header.
-- `hunting-clawd-animations`: find and archive new official Clawd animations.
+- `regenerating-firmware-assets`: fonts (add Latin-1 glyphs for Spanish), RGB565A8 icons, the Clawd animation header.
+- `porting-a-board`, `cutting-a-release`, `capturing-desktop-screenshots`, `hunting-clawd-animations`: upstream maintenance; rarely needed here.

@@ -1,0 +1,5 @@
+# Agentes page scenario: usage keys ("ok":true keeps the meters valid) plus `ag`.
+# SIM_SCENARIO=sim/agents.jsonl. ag: [name, state 0 pausa/1 trabajando/2 esperando, [[type, task, secs, running]]]
+{"name":"agentes","hold_ms":8000,"s":42.0,"sr":180,"w":33.0,"wr":7900,"st":"allowed","ok":true,"ag":[["Clawdmeter",1,[["programador","sesiones",240,1],["pruebas","test_agents",60,1],["plan","3 páginas",360,0]]],["Web-MGZ",2,[["Explore","rutas API",120,1]]],["Docs",0,[]]]}
+{"name":"agentes: pruebas hechas","hold_ms":6000,"s":44.0,"sr":178,"w":33.0,"wr":7880,"st":"allowed","ok":true,"ag":[["Clawdmeter",1,[["programador","sesiones",248,1],["pruebas","test_agents",68,0],["plan","3 páginas",360,0]]],["Web-MGZ",2,[["Explore","rutas API",128,1]]],["Docs",0,[]]]}
+{"name":"agentes: en pausa","hold_ms":4000,"s":45.0,"sr":176,"w":34.0,"wr":7860,"st":"allowed","ok":true,"ag":[["Clawdmeter",0,[]],["Web-MGZ",0,[]],["Docs",0,[]]]}

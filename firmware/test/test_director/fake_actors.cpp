@@ -229,6 +229,7 @@ void face_look_at_x(int, uint32_t hold_ms) { f_busy_until = now() + hold_ms + 30
 
 // ─── The situation ───────────────────────────────────────────────────────────
 bool ui_meters_live(void) { return world.meters_live; }
+bool ui_clawd_takes_taps(void) { return true; }
 void ui_set_alert_text(const char*) {}
 bool idle_is_asleep(void) { return world.asleep; }
 bool minimal_mode(void) { return false; }

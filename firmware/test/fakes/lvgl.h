@@ -13,9 +13,11 @@ typedef struct _lv_event_t lv_event_t;
 typedef struct _lv_display_t lv_display_t;
 typedef struct { int32_t x, y; } lv_point_t;
 typedef void (*lv_event_cb_t)(lv_event_t*);
-enum { LV_EVENT_PRESSED = 1 };
+enum { LV_EVENT_PRESSED = 1, LV_EVENT_RELEASED = 2 };
+typedef enum { LV_DIR_NONE = 0 } lv_dir_t;
 
 static inline lv_indev_t* lv_indev_get_next(lv_indev_t*) { return (lv_indev_t*)0; }
+static inline lv_dir_t lv_indev_get_gesture_dir(const lv_indev_t*) { return LV_DIR_NONE; }
 static inline void lv_indev_add_event_cb(lv_indev_t*, lv_event_cb_t, int, void*) {}
 static inline void lv_indev_get_point(lv_indev_t*, lv_point_t* p) { p->x = 0; p->y = 0; }
 static inline int32_t lv_display_get_horizontal_resolution(lv_display_t*) { return 480; }
@@ -60,6 +62,14 @@ typedef struct {
     uint32_t pair_cnt;
     uint32_t glyph_ids_size;
 } lv_font_fmt_txt_kern_pair_t;
+
+typedef struct {
+    const int8_t* class_pair_values;   // left_class_cnt * right_class_cnt
+    const uint8_t* left_class_mapping;  // glyph id -> class, 0 = none
+    const uint8_t* right_class_mapping;
+    uint8_t left_class_cnt;
+    uint8_t right_class_cnt;
+} lv_font_fmt_txt_kern_classes_t;
 
 typedef struct {
     const uint8_t* glyph_bitmap;

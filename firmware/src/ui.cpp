@@ -15,6 +15,8 @@
 #include "layout.h"
 #include "ui_text.h"
 #include "pace.h"
+#include "signals.h"
+#include "agents_view.h"
 
 // Where everything goes, from the panel's shape (layout.h). Computed once in
 // ui_init() and treated as const for the rest of the program; a new panel
@@ -68,6 +70,29 @@ static lv_obj_t* lbl_spending_desc = nullptr;     // "of spending limit"
 static lv_obj_t* lbl_spending_status = nullptr;   // "Under pace" / "On pace" / "Over pace"
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
 
+// ---- Pages: sessions | usage | agents, side by side. A side swipe slides
+// the cards to the neighbour page (title, Clawd, battery and status line
+// stay); PAGE_IDLE_MS without a touch slides back to usage.
+enum { PAGE_SESSIONS, PAGE_USAGE, PAGE_AGENTS, PAGE_COUNT };
+static lv_obj_t* pages[PAGE_COUNT];
+static int       page = PAGE_USAGE;
+static uint32_t  page_touch_ms = 0;
+#define PAGE_IDLE_MS  20000
+#define PAGE_SLIDE_MS 250
+static bool      page_pinned = false;   // a long press turns the slide-back off / on
+static bool      long_pressed = false;  // this press was a long press: not a tap for Clawd
+static lv_obj_t* toast = nullptr;       // a short notice in the middle of the screen
+static uint32_t  toast_until = 0;
+#define TOAST_MS      2000
+#define LONG_PRESS_MS 1000
+static lv_obj_t* lbl_sess_num;
+static lv_obj_t* lbl_sess_line;
+static lv_obj_t* lbl_act_word;
+static lv_obj_t* lbl_act_line;
+static lv_obj_t* bar_act;
+static int16_t   hook_sessions = -1;   // -1 = absent: no hooks, shown as "--", never 0
+static int8_t    hook_activity = -1;
+
 // ---- Battery indicator (shared, on top) ----
 static lv_obj_t* battery_img;
 static lv_obj_t* logo_img;
@@ -89,7 +114,7 @@ static const uint32_t DATA_FRESH_MS = 90000;  // usage counts as "live" within t
 // ---- Shared ----
 static lv_image_dsc_t logo_dsc;
 static bool     s_ble_connected = false;   // cached BLE connection state
-static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
+static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Conectado" dwell)
 
 // Animation state
 static uint32_t anim_last_ms = 0;
@@ -112,37 +137,10 @@ static const uint16_t spinner_ms[SPINNER_COUNT] = {
 };
 
 static const char* const anim_messages[] = {
-    "Accomplishing", "Elucidating", "Perusing",
-    "Actioning", "Enchanting", "Philosophising",
-    "Actualizing", "Envisioning", "Pondering",
-    "Baking", "Finagling", "Pontificating",
-    "Booping", "Flibbertigibbeting", "Processing",
-    "Brewing", "Forging", "Puttering",
-    "Calculating", "Forming", "Puzzling",
-    "Cerebrating", "Frolicking", "Reticulating",
-    "Channelling", "Generating", "Ruminating",
-    "Churning", "Germinating", "Scheming",
-    "Clauding", "Hatching", "Schlepping",
-    "Coalescing", "Herding", "Shimmying",
-    "Cogitating", "Honking", "Shucking",
-    "Combobulating", "Hustling", "Simmering",
-    "Computing", "Ideating", "Smooshing",
-    "Concocting", "Imagining", "Spelunking",
-    "Conjuring", "Incubating", "Spinning",
-    "Considering", "Inferring", "Stewing",
-    "Contemplating", "Jiving", "Sussing",
-    "Cooking", "Manifesting", "Synthesizing",
-    "Crafting", "Marinating", "Thinking",
-    "Creating", "Meandering", "Tinkering",
-    "Crunching", "Moseying", "Transmuting",
-    "Deciphering", "Mulling", "Unfurling",
-    "Deliberating", "Mustering", "Unravelling",
-    "Determining", "Musing", "Vibing",
-    "Discombobulating", "Noodling", "Wandering",
-    "Divining", "Percolating", "Whirring",
-    "Doing", "Wibbling",
-    "Effecting", "Wizarding",
-    "Working", "Wrangling",
+    "Calving", "Pontificating", "Reticulating", "Churring",
+    "Muauding", "Conjuring", "Considering", "Desdanieling",
+    "Cooking", "Francesing", "Crafting", "Transmuting",
+    "Deliberating", "Wandering", "Wizarding", "Working",
 };
 #define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
@@ -223,11 +221,11 @@ static void format_reset_time(int mins, char* buf, size_t len, const char* none)
     if (mins < 0) {
         snprintf(buf, len, "%s", none);
     } else if (mins < 60) {
-        snprintf(buf, len, "Resets in %dm", mins);
+        snprintf(buf, len, "Reinicio %dm", mins);
     } else if (mins < 1440) {
-        snprintf(buf, len, "Resets in %dh %dm", mins / 60, mins % 60);
+        snprintf(buf, len, "Reinicio %dh %dm", mins / 60, mins % 60);
     } else {
-        snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
+        snprintf(buf, len, "Reinicio %dd %dh", mins / 1440, (mins % 1440) / 60);
     }
 }
 
@@ -406,6 +404,137 @@ static void apply_title_font(void) {
     lv_obj_clear_flag(lbl_title, LV_OBJ_FLAG_HIDDEN);
 }
 
+// A transparent full-screen layer: the cards of one page, toggled as a unit.
+static lv_obj_t* make_group(lv_obj_t* parent) {
+    lv_obj_t* g = lv_obj_create(parent);
+    lv_obj_set_size(g, L.w, L.h);
+    lv_obj_set_pos(g, 0, 0);
+    lv_obj_set_style_bg_opa(g, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(g, 0, 0);
+    lv_obj_set_style_pad_all(g, 0, 0);
+    lv_obj_clear_flag(g, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(g, LV_OBJ_FLAG_EVENT_BUBBLE);
+    return g;
+}
+
+static void apply_sessions_text(void) {
+    if (!pages[PAGE_SESSIONS]) return;
+    if (hook_sessions < 0) {
+        lv_label_set_text(lbl_sess_num, "--");
+        lv_label_set_text(lbl_sess_line, "sin hooks");
+    } else {
+        lv_label_set_text_fmt(lbl_sess_num, "%d", hook_sessions);
+        lv_label_set_text(lbl_sess_line, hook_sessions == 1 ? "sesión activa" : "sesiones activas");
+    }
+    static const char* const act_words[4] = { "Nada", "Bajo", "Medio", "Alto" };
+    lv_label_set_text(lbl_act_word, hook_activity < 0 ? "--" : act_words[hook_activity]);
+    lv_label_set_text(lbl_act_line, hook_activity < 0 ? "sin hooks" : "uso de herramientas");
+    lv_bar_set_value(bar_act, hook_activity < 0 ? 0 : hook_activity * 100 / 3, LV_ANIM_ON);
+}
+
+// Same two cards as the meters. Pills no wider than "Gasto"/"Ciclo", lines no
+// wider than the reset lines, so every layout that fits those fits these.
+static void build_sessions_page(lv_obj_t* parent) {
+    lv_obj_t* g = pages[PAGE_SESSIONS] = make_group(parent);
+    lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_t *pill, *bar_sess;
+    make_usage_panel(g, L.card[0], "Ahora", &lbl_sess_num, &pill, &bar_sess, &lbl_sess_line);
+    lv_obj_add_flag(bar_sess, LV_OBJ_FLAG_HIDDEN);   // a count has no full scale
+    make_usage_panel(g, L.card[1], "Ritmo", &lbl_act_word, &pill, &bar_act, &lbl_act_line);
+    lv_obj_set_style_bg_color(bar_act, COL_ACCENT, LV_PART_INDICATOR);
+    apply_sessions_text();
+}
+
+// One card over both card slots (agents_view.h).
+static void build_agents_page(lv_obj_t* parent) {
+    lv_obj_t* g = pages[PAGE_AGENTS] = make_group(parent);
+    lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);
+    const LayoutRect& a = L.card[0];
+    const LayoutRect& b = L.card[1];
+    agents_view_create(g, a.x, a.y, a.w, b.y + b.h - a.y);
+}
+
+static void slide_done(lv_anim_t* a) {
+    lv_obj_t* obj = (lv_obj_t*)a->var;
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_x(obj, 0);
+}
+
+static void slide_x(lv_obj_t* obj, int from, int to, bool hide_after) {
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, obj);
+    lv_anim_set_exec_cb(&a, (lv_anim_exec_xcb_t)lv_obj_set_x);
+    lv_anim_set_values(&a, from, to);
+    lv_anim_set_duration(&a, PAGE_SLIDE_MS);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    if (hide_after) lv_anim_set_completed_cb(&a, slide_done);
+    lv_anim_start(&a);
+}
+
+// The incoming page enters from the side the finger came from.
+static void slide_to(int target) {
+    if (target == page || target < 0 || target >= PAGE_COUNT) return;
+    lv_obj_t* from = pages[page];
+    lv_obj_t* to = pages[target];
+    const int dx = target > page ? -L.w : L.w;
+    page = target;
+    page_touch_ms = lv_tick_get();
+    lv_anim_delete(from, NULL);
+    lv_anim_delete(to, NULL);
+    lv_obj_set_style_opa(to, view_state == 1 ? STALE_OPA : LV_OPA_COVER, 0);
+    lv_obj_clear_flag(to, LV_OBJ_FLAG_HIDDEN);
+    if (minimal_mode()) {          // nothing moves: a plain swap
+        lv_obj_add_flag(from, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_x(from, 0);
+        lv_obj_set_x(to, 0);
+        return;
+    }
+    slide_x(from, 0, dx, true);
+    slide_x(to, -dx, 0, false);
+}
+
+static void on_gesture(lv_event_t* e) {
+    (void)e;
+    if (view_state <= 0) return;   // pairing hint: no pages
+    const lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
+    if (dir == LV_DIR_LEFT) slide_to(page + 1);
+    else if (dir == LV_DIR_RIGHT) slide_to(page - 1);
+}
+
+static void show_toast(const char* text) {
+    if (!toast) {
+        toast = lv_label_create(lv_layer_top());
+        lv_obj_set_style_text_font(toast, L.reset_font, 0);
+        lv_obj_set_style_text_color(toast, COL_TEXT, 0);
+        lv_obj_set_style_bg_color(toast, COL_BAR_BG, 0);
+        lv_obj_set_style_bg_opa(toast, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(toast, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_pad_hor(toast, 18, 0);
+        lv_obj_set_style_pad_ver(toast, 10, 0);
+    }
+    lv_label_set_text(toast, text);
+    lv_obj_center(toast);
+    lv_obj_clear_flag(toast, LV_OBJ_FLAG_HIDDEN);
+    toast_until = lv_tick_get() + TOAST_MS;
+}
+
+static void on_indev(lv_event_t* e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) { long_pressed = false; return; }
+    // LONG_PRESSED: pin / unpin the page. Not on the pairing hint, whose
+    // touch hold clears the pairing.
+    if (view_state <= 0) return;
+    long_pressed = true;
+    page_pinned = !page_pinned;
+    page_touch_ms = lv_tick_get();
+    show_toast(page_pinned ? "Pantalla fijada" : "Vuelve a Uso en 20 s");
+}
+
+bool ui_clawd_takes_taps(void) {
+    return !long_pressed && (page != PAGE_AGENTS || view_state <= 0);
+}
+
 static void init_usage_screen(lv_obj_t* scr) {
     usage_container = lv_obj_create(scr);
     lv_obj_set_size(usage_container, L.w, L.h);
@@ -416,20 +545,13 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
 
     lbl_title = lv_label_create(usage_container);
-    lv_label_set_text(lbl_title, "Usage");
+    lv_label_set_text(lbl_title, "Uso");
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     apply_title_font();
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
-    usage_group = lv_obj_create(usage_container);
-    lv_obj_set_size(usage_group, L.w, L.h);
-    lv_obj_set_pos(usage_group, 0, 0);
-    lv_obj_set_style_bg_opa(usage_group, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(usage_group, 0, 0);
-    lv_obj_set_style_pad_all(usage_group, 0, 0);
-    lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
+    usage_group = pages[PAGE_USAGE] = make_group(usage_container);
 
     panel_session = make_usage_panel(usage_group, L.card[0], L.pills[0],
                      &lbl_session_pct, &lbl_session_label,
@@ -443,7 +565,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(lbl_session_pct_sym, LV_OBJ_FLAG_HIDDEN);
 
     lbl_spending_desc = lv_label_create(panel_session);
-    lv_label_set_text(lbl_spending_desc, "of spending limit");
+    lv_label_set_text(lbl_spending_desc, "del límite de gasto");
     lv_obj_set_style_text_font(lbl_spending_desc, L.reset_font, 0);
     lv_obj_set_style_text_color(lbl_spending_desc, COL_DIM, 0);
     lv_obj_set_pos(lbl_spending_desc, 0, L.reset_y);
@@ -464,6 +586,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     tick_session = make_pace_tick(bar_session);
     tick_weekly  = make_pace_tick(bar_weekly);
 
+    build_sessions_page(usage_container);
+    build_agents_page(usage_container);
     build_pair_group(usage_container);
 
     // Status line — always visible on the usage view. Driven by ui_tick_anim().
@@ -501,6 +625,13 @@ void ui_init(void) {
     init_battery_icons();
 
     init_usage_screen(scr);
+    lv_obj_remove_flag(scr, LV_OBJ_FLAG_GESTURE_BUBBLE);   // swipes stop at the screen
+    lv_obj_add_event_cb(scr, on_gesture, LV_EVENT_GESTURE, NULL);
+    if (lv_indev_t* indev = lv_indev_get_next(NULL)) {
+        lv_indev_set_long_press_time(indev, LONG_PRESS_MS);
+        lv_indev_add_event_cb(indev, on_indev, LV_EVENT_PRESSED, NULL);
+        lv_indev_add_event_cb(indev, on_indev, LV_EVENT_LONG_PRESSED, NULL);
+    }
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
@@ -573,6 +704,11 @@ void ui_set_pace_marker(bool on) {
 
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
+    if (data->sessions != hook_sessions || data->activity != hook_activity) {
+        hook_sessions = data->sessions;
+        hook_activity = data->activity;
+        apply_sessions_text();
+    }
     data_ok = data->ok;
     if (!data->ok) return;          // a {"ok":false} "no data" beat → fall through to idle, keep last numbers
     last_data = *data;
@@ -589,7 +725,7 @@ void ui_update(const UsageData* data) {
     } else if (clock_base_epoch != 0) {   // clock turned off daemon-side → revert title to "Usage"
         clock_base_epoch = 0;
         clock_last_min = -1;
-        lv_label_set_text(lbl_title, "Usage");
+        lv_label_set_text(lbl_title, "Uso");
         apply_title_font();
     }
 
@@ -617,13 +753,13 @@ void ui_update(const UsageData* data) {
     char buf[48];
 
     // Pace vars used in both enterprise blocks below
-    const char* pace_text = "Under pace";
+    const char* pace_text = "Por debajo";
     lv_color_t  pace_color = COL_GREEN;
     const char* pace_hex   = "788c5d";   // matches THEME_GREEN
     if (data->session_pct > (float)data->time_pct + 15.0f) {
-        pace_text = "Over pace";  pace_color = COL_RED;   pace_hex = "c0392b";
+        pace_text = "Por encima"; pace_color = COL_RED;   pace_hex = "c0392b";
     } else if (data->session_pct > (float)data->time_pct - 15.0f) {
-        pace_text = "On pace";    pace_color = COL_AMBER; pace_hex = "d97757";
+        pace_text = "Al ritmo";   pace_color = COL_AMBER; pace_hex = "d97757";
     }
 
     if (data->enterprise) {
@@ -632,7 +768,7 @@ void ui_update(const UsageData* data) {
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf), "Not started");
+        format_reset_time(data->session_reset_mins, buf, sizeof(buf), "Sin empezar");
         lv_label_set_text(lbl_session_reset, buf);
     }
 
@@ -648,9 +784,9 @@ void ui_update(const UsageData* data) {
                               COL_RED;
         lv_obj_set_style_bg_color(bar_weekly, bar_pace, LV_PART_INDICATOR);
         if (L.period_short)
-            snprintf(buf, sizeof(buf), "#%s Resets %s#", pace_hex, data->reset_date);
+            snprintf(buf, sizeof(buf), "#%s Reinicio %s#", pace_hex, data->reset_date);
         else
-            snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Resets %s#",
+            snprintf(buf, sizeof(buf), "#%s %s# - #faf9f5 Reinicio %s#",
                      pace_hex, pace_text, data->reset_date);
         lv_obj_set_style_text_font(lbl_weekly_reset, L.period_font, 0);
         lv_label_set_text(lbl_weekly_reset, buf);
@@ -682,21 +818,35 @@ static void update_view_state(void) {
     }
     if (v == view_state) return;
     view_state = v;
+    if (v == 0) page = PAGE_USAGE;   // back on the meters when the link returns
+    for (lv_obj_t* p : pages) {      // a slide in flight snaps to its end
+        lv_anim_delete(p, NULL);
+        lv_obj_set_x(p, 0);
+        lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_t* shown = pages[page];
     if (v == 0) {
-        lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(shown, LV_OBJ_FLAG_HIDDEN);
         // `opa` (not `opa_layered`) scales every draw of the group and its
         // children: no layer buffer, so it costs nothing on the C6.
-        lv_obj_set_style_opa(usage_group, v == 1 ? STALE_OPA : LV_OPA_COVER, 0);
+        lv_obj_set_style_opa(shown, v == 1 ? STALE_OPA : LV_OPA_COVER, 0);
     }
 }
 
 bool ui_meters_live(void) { return view_state == 2; }
 
 void ui_tick_anim(void) {
+    // Any touch keeps a side page up; PAGE_IDLE_MS untouched slides back.
+    lv_indev_t* indev = lv_indev_get_next(NULL);
+    if (indev && lv_indev_get_state(indev) == LV_INDEV_STATE_PRESSED) page_touch_ms = lv_tick_get();
+    if (page != PAGE_USAGE && !page_pinned && lv_tick_get() - page_touch_ms >= PAGE_IDLE_MS) slide_to(PAGE_USAGE);
+    if (toast && toast_until && (int32_t)(lv_tick_get() - toast_until) >= 0) {
+        lv_obj_add_flag(toast, LV_OBJ_FLAG_HIDDEN);
+        toast_until = 0;
+    }
     update_view_state();
     if (pair_hint == PAIR_HINT_CLEARED && lv_tick_get() - pair_hint_since >= PAIR_CLEARED_SHOW_MS)
         ui_set_pair_hint(PAIR_HINT_NORMAL);
@@ -729,8 +879,8 @@ void ui_tick_anim(void) {
 
     if (still) {
         // One glyph, one word per state; redrawn only when it changes.
-        const char* text = !s_ble_connected ? "Waiting"
-                         : view_state == 1 ? (data_received ? "Stale" : "No data") : "Connected";
+        const char* text = !s_ble_connected ? "Esperando"
+                         : view_state == 1 ? (data_received ? "Desfasado" : "Sin datos") : "Conectado";
         if (text != still_shown) {
             still_shown = text;
             static char sbuf[40];
@@ -750,7 +900,17 @@ void ui_tick_anim(void) {
         anim_msg_start = now;
     }
 
-    if (tune.spinner) {
+    // With hooks, the verbs mean Claude is working: after a stop, until the
+    // next prompt, the line rests on a still "En pausa" (before any event since
+    // boot, tool activity decides). Without hooks there's no way to tell, so
+    // the line rests on a still "Conectado" instead.
+    const char ev = signals_last_event();
+    const bool hooks = signals_hooks_seen();
+    const bool paused = s_ble_connected && view_state == 2
+                        && (!hooks || ev == 's' || (ev == '\0' && signals_activity() <= 0));
+    const bool spin = tune.spinner && !paused;
+
+    if (spin) {
         if (now - anim_last_ms < spinner_ms[anim_spinner_idx]) return;
         anim_last_ms = now;
         anim_phase = (anim_phase + 1) % SPINNER_PHASES;
@@ -764,16 +924,18 @@ void ui_tick_anim(void) {
     // Status text by priority. Whimsical messages only when connected & settled.
     const char* text;
     if (!s_ble_connected) {
-        text = "Waiting";              // advertising / waiting for a host connection
+        text = "Esperando";              // advertising / waiting for a host connection
     } else if (view_state == 1) {      // stale — alternate so it reads as alive AND not live
-        text = (anim_msg_idx & 1) ? (data_received ? "Stale" : "No data") : "Listening";
+        text = (anim_msg_idx & 1) ? (data_received ? "Desfasado" : "Sin datos") : "Atento";
     } else if (now - connected_at_ms < 5000) {
-        text = "Connected";
+        text = "Conectado";
+    } else if (paused) {
+        text = hooks ? "En pausa" : "Conectado";
     } else {
         text = anim_messages[anim_verb_idx];
     }
 
-    if (!tune.spinner) {
+    if (!spin) {
         if (text == frozen_shown) return;
         frozen_shown = text;
     }

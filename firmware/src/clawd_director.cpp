@@ -296,7 +296,11 @@ void director_set_liveliness(int level) {
 static void indev_cb(lv_event_t* e) {
     (void)e;
     lv_point_t p = { 0, 0 };
-    if (touch_indev) lv_indev_get_point(touch_indev, &p);
+    if (touch_indev) {
+        if (lv_indev_get_gesture_dir(touch_indev) != LV_DIR_NONE) return;   // a swipe turns the page (ui.cpp)
+        if (!attention_on && !ui_clawd_takes_taps()) return;   // the agents page and long presses own theirs; an alert still ends
+        lv_indev_get_point(touch_indev, &p);
+    }
     director_tap(p.x);
 }
 
@@ -372,9 +376,9 @@ void director_init(void) {
     apply_minimal(minimal_mode());
     go(B_HOME);
     // Every press on the panel, wherever it lands, is a tap for the
-    // director. PRESSED (not CLICKED) so the reaction starts on the next frame.
+    // director. RELEASED (not PRESSED) so a swipe can be told apart and skipped.
     touch_indev = lv_indev_get_next(NULL);
-    if (touch_indev) lv_indev_add_event_cb(touch_indev, indev_cb, LV_EVENT_PRESSED, NULL);
+    if (touch_indev) lv_indev_add_event_cb(touch_indev, indev_cb, LV_EVENT_RELEASED, NULL);
 }
 
 DirectorRoom director_room(void) { return face_visible() ? ROOM_FACE : ROOM_METERS; }

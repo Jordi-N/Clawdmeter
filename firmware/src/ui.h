@@ -18,6 +18,10 @@ void ui_update_battery(int percent, bool charging, bool usb_power);  // percent 
 // the pairing hint or the stale-data idle view.
 bool ui_meters_live(void);
 
+// False while the agents page is up (its rows take the taps) or the press
+// was a long press (it pins the page): those touches aren't for Clawd.
+bool ui_clawd_takes_taps(void);
+
 // The pairing hint (shown while disconnected) is on screen.
 bool ui_pair_hint_visible(void);
 

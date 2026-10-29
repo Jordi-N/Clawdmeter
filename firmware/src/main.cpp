@@ -13,6 +13,8 @@
 #include "usage_rate.h"
 #include "signals.h"
 #include "payload.h"
+#include "agents_payload.h"
+#include "agents_view.h"
 #include "minimal_mode.h"
 #include "build_info.h"
 #include "idle.h"
@@ -371,6 +373,7 @@ void loop() {
     idle_tick();
     lv_timer_handler();
     ui_tick_anim();
+    agents_view_tick(millis());
     ble_tick();
     power_hal_tick();
     imu_hal_tick();
@@ -463,7 +466,16 @@ void loop() {
     check_serial_cmd();
 
     if (ble_has_data()) {
-        if (parse_json(ble_get_data(), &usage)) {
+        // `ag` (the Agentes page) may ride along with the usage keys or come
+        // alone; alone (no `ok`) it must skip the usage path, whose absent
+        // keys would read as zeros.
+        const char* json = ble_get_data();
+        static AgentsData agents;
+        bool agents_only = false;
+        if (agents_parse(json, &agents, &agents_only)) agents_view_set(&agents);
+        if (agents_only) {
+            ble_send_ack();
+        } else if (parse_json(json, &usage)) {
             // Fast + slow clock bookkeeping: rate sample (replays skipped),
             // hook activity lift, event dedupe. See signals.h.
             const SignalsUpdate sig = signals_ingest(&usage);

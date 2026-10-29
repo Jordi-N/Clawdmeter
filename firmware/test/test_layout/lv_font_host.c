@@ -28,8 +28,14 @@ static uint32_t glyph_id(const lv_font_fmt_txt_dsc_t* d, uint32_t cp) {
 }
 
 static int8_t kern(const lv_font_fmt_txt_dsc_t* d, uint32_t left, uint32_t right) {
+    if (d->kern_dsc && d->kern_classes) {   // as lv_font_fmt_txt.c's get_kern_value
+        const lv_font_fmt_txt_kern_classes_t* c = (const lv_font_fmt_txt_kern_classes_t*)d->kern_dsc;
+        const uint8_t lc = c->left_class_mapping[left];
+        const uint8_t rc = c->right_class_mapping[right];
+        return (lc && rc) ? c->class_pair_values[(lc - 1) * c->right_class_cnt + (rc - 1)] : 0;
+    }
     const lv_font_fmt_txt_kern_pair_t* k = (const lv_font_fmt_txt_kern_pair_t*)d->kern_dsc;
-    if (!k || d->kern_classes || k->glyph_ids_size != 0) return 0;
+    if (!k || k->glyph_ids_size != 0) return 0;
     const uint8_t* ids = (const uint8_t*)k->glyph_ids;
     for (uint32_t i = 0; i < k->pair_cnt; i++)
         if (ids[2 * i] == left && ids[2 * i + 1] == right) return k->values[i];
