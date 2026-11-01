@@ -34,6 +34,7 @@ static void test_first_seq_is_baseline_then_fires_once(void) {
     UsageData d = parse("{\"s\":1,\"e\":\"p\",\"es\":7}");
     TEST_ASSERT_FALSE(signals_ingest_at(&d, 1000).event_fired);   // stale on arrival
     TEST_ASSERT_TRUE(signals_hooks_seen());
+    TEST_ASSERT_EQUAL_CHAR('p', signals_last_event());   // but its state counts (status line)
 
     d = parse("{\"s\":1,\"e\":\"s\",\"es\":8}");
     SignalsUpdate u = signals_ingest_at(&d, 2000);

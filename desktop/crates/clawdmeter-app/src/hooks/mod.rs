@@ -265,6 +265,11 @@ pub fn clear_name(v: &Value) -> Option<String> {
 }
 
 fn touch_clear(v: &Value, dir: &Path) -> io::Result<()> {
+    // A background subagent's tool call shares the session id but isn't the
+    // user answering: it must not end the session's alert.
+    if present(v.get("agent_id")).is_some() {
+        return Ok(());
+    }
     let Some(name) = clear_name(v) else { return Ok(()) };
     let f: File = OpenOptions::new().create(true).truncate(false).write(true).open(dir.join(name))?;
     // `touch` on an existing file: the daemon compares this mtime with the alert's.
@@ -312,6 +317,17 @@ mod tests {
         assert_eq!(Mode::parse(&args("event")), Mode { action: Action::Event, log_too: false });
         assert_eq!(Mode::parse(&args("bogus event")), Mode { action: Action::None, log_too: true });
         assert_eq!(Mode::parse(&[]), Mode { action: Action::None, log_too: false });
+    }
+
+    #[test]
+    fn subagent_tool_calls_dont_clear() {
+        let d = dir("subclear");
+        fs::create_dir_all(&d).unwrap();
+        touch_clear(&json!({"session_id": "s1", "agent_id": "a9"}), &d).unwrap();
+        assert!(!d.join("clear-s1").exists());
+        touch_clear(&json!({"session_id": "s1"}), &d).unwrap();
+        assert!(d.join("clear-s1").exists());
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

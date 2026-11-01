@@ -224,6 +224,10 @@ impl Render for OverviewView {
                     (Some(a), None) => tilde(a, &home),
                     (None, _) => "Aún no hay datos de uso".into(),
                 };
+                let sub = match s.via() {
+                    Some(via) if !s.logged_out => format!("{sub} · por {via}"),
+                    _ => sub,
+                };
                 (state_tone(s.tray_state()), state_title(s), sub)
             }
         };

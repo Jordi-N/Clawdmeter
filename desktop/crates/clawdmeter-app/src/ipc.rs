@@ -20,6 +20,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 
+use clawdmeter_core::wifi::{Secret, Transport, WifiStatus};
 use clawdmeter_core::Paths;
 use serde::{Deserialize, Serialize};
 
@@ -129,17 +130,35 @@ pub struct StatusSnapshot {
     /// Unix seconds the weekly window resets (`None`: unknown).
     #[serde(default)]
     pub week_resets_at: Option<i64>,
+    /// The link in use while connected: `wifi` | `ble`.
+    #[serde(default)]
+    pub transport: Option<Transport>,
+    /// The device's address while the link is WiFi.
+    #[serde(default)]
+    pub wifi_addr: Option<String>,
+    /// What the device last reported about its WiFi.
+    #[serde(default)]
+    pub wifi: Option<WifiStatus>,
+    /// WiFi is the choice, but it isn't reachable: on Bluetooth.
+    #[serde(default)]
+    pub wifi_fallback: bool,
+    /// The last "send to the device" result, for the Device page.
+    #[serde(default)]
+    pub wifi_send: Option<String>,
+    /// That result: `true` done, `false` failed, absent while waiting.
+    #[serde(default)]
+    pub wifi_send_ok: Option<bool>,
 }
 
 impl StatusSnapshot {
     /// Build from the daemon's status.
     pub fn from_status(s: &Status, now: i64) -> Self {
-        let (link, device_key, device_name, link_detail) = match &s.link {
-            LinkState::Starting => ("starting", None, None, None),
-            LinkState::NoAdapter(e) => ("no_adapter", None, None, Some(e.clone())),
-            LinkState::Searching => ("searching", None, None, None),
-            LinkState::Connecting => ("connecting", None, None, None),
-            LinkState::Connected { key, name } => ("connected", Some(key.clone()), name.clone(), None),
+        let (link, device_key, device_name, link_detail, transport) = match &s.link {
+            LinkState::Starting => ("starting", None, None, None, None),
+            LinkState::NoAdapter(e) => ("no_adapter", None, None, Some(e.clone()), None),
+            LinkState::Searching => ("searching", None, None, None, None),
+            LinkState::Connecting => ("connecting", None, None, None, None),
+            LinkState::Connected { key, name, via } => ("connected", Some(key.clone()), name.clone(), None, Some(*via)),
         };
         let e = &s.engine;
         let reading = e.reading.as_ref();
@@ -184,6 +203,20 @@ impl StatusSnapshot {
                 .and_then(|w| w.resets_at)
                 .map(|t| t.timestamp()),
             week_resets_at: reading.and_then(|r| r.week.as_ref()).and_then(|w| w.resets_at).map(|t| t.timestamp()),
+            transport,
+            wifi_addr: s.wifi.addr.clone(),
+            wifi: s.wifi.device.clone(),
+            wifi_fallback: s.wifi.fallback,
+            wifi_send: s.wifi.send.as_ref().map(|(_, m)| m.clone()),
+            wifi_send_ok: s.wifi.send.as_ref().and_then(|(ok, _)| *ok),
+        }
+    }
+
+    /// The link in use, for status lines: `WiFi` | `Bluetooth`.
+    pub fn via(&self) -> Option<&'static str> {
+        match self.transport? {
+            Transport::Wifi => Some("WiFi"),
+            Transport::Ble => Some("Bluetooth"),
         }
     }
 
@@ -275,6 +308,13 @@ pub enum AppCommand {
     Open(String),
     /// Re-run the firmware update check now.
     CheckUpdate,
+    /// Send a WiFi network to the device over Bluetooth.
+    WifiSend {
+        /// Network name.
+        ssid: String,
+        /// Its password.
+        pass: Secret,
+    },
     /// Stop the daemon and exit.
     Quit,
 }
@@ -283,6 +323,12 @@ impl AppCommand {
     /// Wire form, one line.
     pub fn encode(&self) -> String {
         match self {
+            // JSON keeps spaces and odd characters in the name and password
+            // on one line. shortcut: the password sits in the commands file
+            // for at most one tray tick (500 ms); a pipe would avoid even that.
+            AppCommand::WifiSend { ssid, pass } => {
+                format!("wifi-send {}", serde_json::json!({"ssid": ssid, "pass": pass.0}))
+            }
             AppCommand::Refresh => "refresh".into(),
             AppCommand::Reconnect => "reconnect".into(),
             AppCommand::Forget => "forget".into(),
@@ -295,6 +341,11 @@ impl AppCommand {
 
     /// Parse one line.
     pub fn decode(line: &str) -> Option<Self> {
+        if let Some(json) = line.strip_prefix("wifi-send ") {
+            let v: serde_json::Value = serde_json::from_str(json).ok()?;
+            let field = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_owned);
+            return Some(AppCommand::WifiSend { ssid: field("ssid")?, pass: Secret(field("pass")?) });
+        }
         let mut it = line.split_whitespace();
         Some(match (it.next()?, it.next()) {
             ("refresh", None) => AppCommand::Refresh,
@@ -456,11 +507,37 @@ mod tests {
             },
             last_write_at: last_write,
             claude: None,
+            wifi: Default::default(),
         }
     }
 
     fn connected() -> LinkState {
-        LinkState::Connected { key: "AA:BB".into(), name: Some("Clawdmeter".into()) }
+        LinkState::Connected { key: "AA:BB".into(), name: Some("Clawdmeter".into()), via: Transport::Ble }
+    }
+
+    #[test]
+    fn snapshot_says_which_link() {
+        let mut s = status(connected(), true, Some(990));
+        assert_eq!(StatusSnapshot::from_status(&s, 1_000).via(), Some("Bluetooth"));
+        s.link = LinkState::Connected { key: "AA:BB".into(), name: None, via: Transport::Wifi };
+        s.wifi.addr = Some("192.168.1.50".into());
+        s.wifi.send = Some((None, "waiting".into()));
+        let snap = StatusSnapshot::from_status(&s, 1_000);
+        assert_eq!((snap.via(), snap.wifi_addr.as_deref()), (Some("WiFi"), Some("192.168.1.50")));
+        assert_eq!((snap.wifi_send.as_deref(), snap.wifi_send_ok), (Some("waiting"), None));
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(json.contains(r#""transport":"wifi""#), "{json}");
+        assert_eq!(StatusSnapshot::from_status(&status(LinkState::Searching, true, None), 1_000).via(), None);
+        // An older status file (no transport) still reads.
+        let old: StatusSnapshot = serde_json::from_str(
+            r#"{"updated_at":1,"link":"connected","device_key":null,
+            "device_name":null,"link_detail":null,"account":null,"session_pct":null,"week_pct":null,
+            "window_started":false,"read_at":null,"stale":false,"logged_out":false,"errors":[],"attention":false,
+            "activity":0,"sessions":0,"hooks":false,"claude":null,"last_write_at":null,"chimes_muted":false,
+            "latest_firmware":null,"device_firmware":null,"tray":"Connected"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.transport, None);
     }
 
     #[test]
@@ -513,6 +590,7 @@ mod tests {
             AppCommand::Mute(true),
             AppCommand::Open("hooks".into()),
             AppCommand::Forget,
+            AppCommand::WifiSend { ssid: "Mi casa #2".into(), pass: Secret("p a\"ss\n".into()) },
             AppCommand::Quit,
         ];
         for c in &cmds {

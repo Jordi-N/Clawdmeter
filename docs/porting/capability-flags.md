@@ -41,6 +41,8 @@ is compiled differently for them; set them directly in `caps.cpp`.
 
 ## Build-flag macros
 
+`BOARD_HAS_WIFI` (default 0) is also a `-D` build flag, set only on the `waveshare_amoled_216` and `sim` envs. It compiles in the WiFi transport (`host_wifi.cpp`, `host_tcp.cpp`, `wifi_radio_esp.cpp`; the sim swaps the radio for `boards/sim/wifi_radio_sim.cpp`, see [protocol.md](../protocol.md#wifi-transport)). Without it the `host_wifi.h` calls are no-op stubs and the WiFi libraries aren't linked. Enable it only where the app partition has room for the WiFi stack.
+
 `BOARD_HAS_PSRAM` is set as a `-D` build flag in `platformio.ini` (not in `board.h`) on chips with external PSRAM wired up. Shared code (`main.cpp`) and per-board display drivers use it to choose between `MALLOC_CAP_SPIRAM` (large buffers) and `MALLOC_CAP_INTERNAL` (smaller buffers, partial-render LVGL, screenshot capture disabled). The full-size sprites (`performer.cpp`, `mascot.cpp`) ask for PSRAM at run time and fall back to corner acts without it. New ESP32-C6 / ESP32-C3 ports must leave this undefined.
 
 ## Adding capabilities

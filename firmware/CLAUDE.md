@@ -21,7 +21,9 @@ pins and hardware gotchas, which loads when you work in that folder.
   → `signals.cpp` (fast clock: activity, events, sessions; feeds
   `usage_rate.cpp`, the slow clock that turns a 15-min window of real samples
   into Idle/Normal/Active/Heavy) → the director. Buttons and serial commands
-  are in `main.cpp` too.
+  are in `main.cpp` too. BLE writes and TCP lines (WiFi transport,
+  `host_wifi.cpp`/`host_tcp.cpp`, only with `BOARD_HAS_WIFI`) share one
+  dispatch, `handle_line()`; either link counts as "connected to a host".
 - **Clawd**: `clawd_director.cpp` owns the rooms and runs the beats;
   `clawd_policy.cpp` holds the pure rules and every timing (`ClawdTuning`,
   `clawd_tuning_fast()` under `SIM_FAST`). There is no separate stage:

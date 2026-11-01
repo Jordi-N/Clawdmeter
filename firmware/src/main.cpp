@@ -23,6 +23,8 @@
 #include "clawd_prefs.h"
 #include "perf.h"
 #include "pair_hold.h"
+#include "host_wifi.h"
+#include "wifi_proto.h"
 
 #include "hal/board_caps.h"
 #include "hal/display_hal.h"
@@ -180,8 +182,10 @@ static void send_screenshot() {
 // One JSON line identifying this build, for the desktop flasher's first
 // detection probe. Keys are fixed: env, ver, rev, link.
 static void send_info() {
-    Serial.printf("{\"env\":\"%s\",\"ver\":\"%s\",\"rev\":\"%s\",\"link\":\"ble\"}\n",
-                  CLAWD_ENV, CLAWD_VERSION, board_hal_rev());
+    char w[96];
+    const size_t wn = host_wifi_status(w, sizeof(w));   // 0 on boards without WiFi
+    Serial.printf("{\"env\":\"%s\",\"ver\":\"%s\",\"rev\":\"%s\",\"link\":\"ble\"%s%s}\n",
+                  CLAWD_ENV, CLAWD_VERSION, board_hal_rev(), wn ? ",\"wifi\":" : "", wn ? w : "");
 }
 
 static void check_serial_cmd() {
@@ -283,6 +287,7 @@ void setup() {
     lv_indev_set_read_cb(indev, my_touch_cb);
 
     ble_init();
+    host_wifi_init();
     input_hal_init();
 
     ui_init();
@@ -369,6 +374,127 @@ static void touch_pair_tick(void) {
     }
 }
 
+// Where a line came from, so its ack goes back the same way.
+enum Link { LINK_BLE, LINK_TCP };
+
+static void reply(Link link, const char* line) {
+    if (link == LINK_BLE) ble_send_line(line);
+    else host_wifi_send(line);
+}
+
+static void send_all(const char* line) {
+    ble_send_line(line);
+    host_wifi_send(line);
+}
+
+static bool got_data = false;   // some usage line arrived (any link)
+
+// One JSON line from the app, over BLE or TCP: the single dispatch path.
+// `ag` (the Agentes page) and `wifi` (provisioning) may ride along with the
+// usage keys or come alone; alone (no `ok`) they must skip the usage path,
+// whose absent keys would read as zeros.
+static void handle_line(const char* json, Link link) {
+    static AgentsData agents;
+    bool agents_only = false;
+    if (agents_parse(json, &agents, &agents_only)) agents_view_set(&agents);
+    WifiCmd wc;
+    bool wifi_only = false;
+    const bool has_wifi = wifi_cmd_parse(json, &wc, &wifi_only);
+    if (has_wifi) host_wifi_apply(&wc);
+    // A `wifi` line is acked with the WiFi status (none on boards without it).
+    char ack[128] = "{\"ack\":true}";
+    char w[96];
+    if (has_wifi && host_wifi_status(w, sizeof(w)))
+        snprintf(ack, sizeof(ack), "{\"ack\":true,\"wifi\":%s}", w);
+    if (wifi_only && !has_wifi) {
+        reply(link, "{\"err\":true}");   // malformed `wifi` value
+    } else if (agents_only || wifi_only) {
+        reply(link, ack);
+    } else if (parse_json(json, &usage)) {
+        got_data = true;
+        // Fast + slow clock bookkeeping: rate sample (replays skipped),
+        // hook activity lift, event dedupe. See signals.h.
+        const SignalsUpdate sig = signals_ingest(&usage);
+        const bool session_reset = sig.session_reset;
+        const int g_before = sig.group_before;
+        const int g_after  = sig.group_after;
+        shown_group = g_after;
+        if (sig.event_fired)
+            Serial.printf("[%lu] hook event '%c' (#%lu)\n", (unsigned long)millis(),
+                          sig.event ? sig.event : '?', (unsigned long)sig.event_seq);
+        // 5-hour session limit refilled → ding so the user knows they can
+        // use Claude again (no-op on boards without sound). Gated on the
+        // app's opt-in `c` (reset_chime); the `chime` serial cmd ignores it.
+        if (session_reset && usage.chime) {
+            Serial.println("session reset detected — chime");
+            sound_hal_chime();
+        }
+        // Claude Code hook fired on the host: the same ding. Not gated on
+        // `c`: the app only sets `b` when its alert chime is on.
+        if (usage.beep) {
+            Serial.println("attention — chime");
+            sound_hal_chime();
+        }
+        if (usage.pace_marker >= 0) pace_marker_set(usage.pace_marker != 0);
+        ui_update(&usage);
+        // A prompt (or you're back after a gap): you're at the computer,
+        // so a dimmed or dark panel wakes before Clawd notices you. A
+        // Stop or tool activity doesn't: Claude working alone isn't you.
+        if (sig.event_fired && (sig.event == 'p' || sig.event == 'b'))
+            idle_note_activity();
+        if (usage.liveliness > 0) liveliness_set(usage.liveliness);
+        if (usage.attn_anim_s >= 0) attn_anim_set(usage.attn_anim_s);
+        director_on_payload(&usage, &sig);
+        if (usage.alert_msg[0]) {
+            Serial.println("attention — mascot");
+            idle_note_activity();
+            director_alert(usage.alert_msg);
+        }
+        if (usage.alert_clear) director_alert_clear();
+        if (g_after != g_before)
+            Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
+                g_before, g_after, usage.session_pct);
+        reply(link, ack);
+    } else {
+        reply(link, "{\"err\":true}");
+    }
+}
+
+static void on_tcp_line(const char* line) { handle_line(line, LINK_TCP); }
+
+// WiFi status to the app on every change (BLE TX and the TCP host), and once
+// to each new host: a TCP host right after auth, plus a refresh request if
+// there's no data yet (the REQ characteristic's job on BLE); a BLE host 2 s
+// after it connects, once it has had time to subscribe to TX.
+static void report_wifi(void) {
+    char w[96], line[112];
+    if (!host_wifi_status(w, sizeof(w))) return;   // board without WiFi
+    snprintf(line, sizeof(line), "{\"wifi\":%s}", w);
+
+    static bool had_client = false;
+    const bool client = host_wifi_client();
+    if (client && !had_client) {
+        host_wifi_send(line);
+        if (!got_data) host_wifi_send("{\"req\":true}");
+    }
+    had_client = client;
+
+    static bool ble_was = false;
+    static uint32_t ble_status_at = 0;   // 0 = nothing pending
+    const bool ble_now = ble_get_state() == BLE_STATE_CONNECTED;
+    if (ble_now && !ble_was) ble_status_at = millis() + 2000;
+    ble_was = ble_now;
+
+    if (host_wifi_take_changed()) {
+        send_all(line);
+    } else if (ble_status_at && ble_now && (int32_t)(millis() - ble_status_at) >= 0) {
+        ble_send_line(line);
+    } else {
+        return;
+    }
+    ble_status_at = 0;
+}
+
 void loop() {
     idle_tick();
     lv_timer_handler();
@@ -381,7 +507,10 @@ void loop() {
     performer_tick();
     mascot_tick();
     director_tick();
-    if (director_take_dismissed()) ble_send_dismiss();
+    if (director_take_dismissed()) {
+        ble_send_dismiss();
+        host_wifi_send("{\"dismiss\":true}");
+    }
     // Rotation transition (blank + ramp) would fight the idle fade — skip
     // ticks while the panel is dark. A rotation that happens during sleep
     // is detected by the next tick after wake and ramped in then.
@@ -443,7 +572,10 @@ void loop() {
         touch_pair_tick();
     }
 
+    // Connected to a host = BLE link or an authenticated TCP client; the UI
+    // (status line, pairing hint, stale view) treats both the same.
     ble_state_t bs = ble_get_state();
+    if (host_wifi_client()) bs = BLE_STATE_CONNECTED;
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
@@ -465,64 +597,9 @@ void loop() {
 
     check_serial_cmd();
 
-    if (ble_has_data()) {
-        // `ag` (the Agentes page) may ride along with the usage keys or come
-        // alone; alone (no `ok`) it must skip the usage path, whose absent
-        // keys would read as zeros.
-        const char* json = ble_get_data();
-        static AgentsData agents;
-        bool agents_only = false;
-        if (agents_parse(json, &agents, &agents_only)) agents_view_set(&agents);
-        if (agents_only) {
-            ble_send_ack();
-        } else if (parse_json(json, &usage)) {
-            // Fast + slow clock bookkeeping: rate sample (replays skipped),
-            // hook activity lift, event dedupe. See signals.h.
-            const SignalsUpdate sig = signals_ingest(&usage);
-            const bool session_reset = sig.session_reset;
-            const int g_before = sig.group_before;
-            const int g_after  = sig.group_after;
-            shown_group = g_after;
-            if (sig.event_fired)
-                Serial.printf("[%lu] hook event '%c' (#%lu)\n", (unsigned long)millis(),
-                              sig.event ? sig.event : '?', (unsigned long)sig.event_seq);
-            // 5-hour session limit refilled → ding so the user knows they can
-            // use Claude again (no-op on boards without sound). Gated on the
-            // app's opt-in `c` (reset_chime); the `chime` serial cmd ignores it.
-            if (session_reset && usage.chime) {
-                Serial.println("session reset detected — chime");
-                sound_hal_chime();
-            }
-            // Claude Code hook fired on the host: the same ding. Not gated on
-            // `c`: the app only sets `b` when its alert chime is on.
-            if (usage.beep) {
-                Serial.println("attention — chime");
-                sound_hal_chime();
-            }
-            if (usage.pace_marker >= 0) pace_marker_set(usage.pace_marker != 0);
-            ui_update(&usage);
-            // A prompt (or you're back after a gap): you're at the computer,
-            // so a dimmed or dark panel wakes before Clawd notices you. A
-            // Stop or tool activity doesn't: Claude working alone isn't you.
-            if (sig.event_fired && (sig.event == 'p' || sig.event == 'b'))
-                idle_note_activity();
-            if (usage.liveliness > 0) liveliness_set(usage.liveliness);
-            if (usage.attn_anim_s >= 0) attn_anim_set(usage.attn_anim_s);
-            director_on_payload(&usage, &sig);
-            if (usage.alert_msg[0]) {
-                Serial.println("attention — mascot");
-                idle_note_activity();
-                director_alert(usage.alert_msg);
-            }
-            if (usage.alert_clear) director_alert_clear();
-            if (g_after != g_before)
-                Serial.printf("usage rate: group %d -> %d (s=%.2f%%)\n",
-                    g_before, g_after, usage.session_pct);
-            ble_send_ack();
-        } else {
-            ble_send_nack();
-        }
-    }
+    if (ble_has_data()) handle_line(ble_get_data(), LINK_BLE);
+    host_wifi_tick(on_tcp_line);
+    report_wifi();
 
     // The mood group also moves without a payload: the 15-min window decays
     // to Idle on its own and a hook activity lift expires. Nothing needs to

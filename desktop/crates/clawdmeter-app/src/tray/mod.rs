@@ -114,6 +114,9 @@ impl Items {
         if snap.link == "no_adapter" {
             label = "Bluetooth no disponible".into();
         }
+        if let (Some(via), TrayState::Connected) = (snap.via(), state) {
+            label = format!("{label} por {via}");
+        }
         self.status.set_text(format!("Clawdmeter · {label}"));
         let account = snap.account.as_deref().map(|a| tilde(a, &paths.home));
         self.account.set_text(match (account, snap.age(now)) {
@@ -218,6 +221,7 @@ impl TrayApp {
                 }
             }
             AppCommand::CheckUpdate => self.check_now.store(true, Ordering::SeqCst),
+            AppCommand::WifiSend { ssid, pass } => self.send(Command::ProvisionWifi { ssid, pass }),
             AppCommand::Quit => return false,
         }
         true

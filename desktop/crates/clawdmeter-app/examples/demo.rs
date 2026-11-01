@@ -8,12 +8,13 @@
 //!   cargo run -p clawdmeter-app --example demo -- [--page PAGE] [--status connected|off]
 //!   [--board none|fresh|current|old] [--setup welcome|board|flash|pair|hooks|done] [--hooks-preview]
 //!   [--flash-to identify|firmware|flash|done] [--shop] [--accounts retrying] [--refresh wait|checking]
-//!   [--advanced] [--session idle] [--height PX]
+//!   [--advanced] [--session idle] [--height PX] [--wifi on|fallback]
 //! ```
 //!
 //! `--accounts retrying` adds a second account that is being rate-limited;
 //! `--refresh` shows the Overview's refresh button waiting out the
-//! per-account gap, or mid-check.
+//! per-account gap, or mid-check. `--wifi` provisions a fake WiFi link:
+//! connected over it, or falling back to Bluetooth.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,6 +26,7 @@ use clawdmeter_app::ui::overview::OverviewView;
 use clawdmeter_app::ui::settings::SettingsView;
 use clawdmeter_app::ui::setup::Step as SetupStep;
 use clawdmeter_app::Page;
+use clawdmeter_core::wifi::{Transport, WifiStatus};
 use clawdmeter_core::{unix_now, Paths};
 use clawdmeter_flash::device::{ChipInfo, DeviceError, FirmwareInfo, FlashProgress};
 use clawdmeter_flash::release::sha256_hex;
@@ -108,13 +110,19 @@ fn release(paths: &Paths) -> std::path::PathBuf {
     dir.join("manifest.json")
 }
 
-fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, idle: bool) {
+fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, idle: bool, wifi: Option<String>) {
     let paths = paths.clone();
     let work = paths.home.join(".claude-work");
     if retrying {
         std::fs::create_dir_all(&work).unwrap();
         std::fs::write(&paths.config_file, "config_dirs = ~/.claude, ~/.claude-work\n").unwrap();
     }
+    if wifi.is_some() {
+        let mut cfg = std::fs::read_to_string(&paths.config_file).unwrap_or_default();
+        cfg.push_str("connection = wifi\nwifi_key = 0123456789abcdef0123456789abcdef\nwifi_ssid = Casa\n");
+        std::fs::write(&paths.config_file, cfg).unwrap();
+    }
+    let on_wifi = wifi.as_deref() == Some("on");
     let started = unix_now();
     std::thread::spawn(move || loop {
         let now = unix_now();
@@ -149,6 +157,14 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, idle: boo
             errors,
             refresh_at: (refresh.as_deref() == Some("wait")).then_some(started + 100),
             polling: refresh.as_deref() == Some("checking"),
+            transport: Some(if on_wifi { Transport::Wifi } else { Transport::Ble }),
+            wifi_addr: on_wifi.then(|| "192.168.1.50".into()),
+            wifi: wifi.is_some().then(|| WifiStatus {
+                st: if on_wifi { "ok" } else { "fail" }.into(),
+                ip: on_wifi.then(|| "192.168.1.50".into()),
+                ssid: Some("Casa".into()),
+            }),
+            wifi_fallback: wifi.as_deref() == Some("fallback"),
             ..Default::default()
         };
         let _ = ipc::write_status(&paths, &snap);
@@ -167,6 +183,7 @@ fn main() {
             arg(&args, "--accounts").as_deref() == Some("retrying"),
             arg(&args, "--refresh"),
             arg(&args, "--session").as_deref() == Some("idle"),
+            arg(&args, "--wifi"),
         );
         let _ = ipc::save_firmware_record(&paths, &FirmwareRecord { env: ENV.into(), ver: "1.8.2".into() });
     } else {

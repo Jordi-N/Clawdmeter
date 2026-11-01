@@ -35,12 +35,15 @@ void touch_hal_init(void) {
 // through the inverse of rotate_strip so hit-tests line up in every quadrant.
 static void to_display_frame(uint16_t* x, uint16_t* y) {
     const uint16_t N = LCD_WIDTH - 1;   // square panel
-    const uint16_t tx = *x > N ? N : *x, ty = *y > N ? N : *y;
+    // The driver's swap/mirror leaves the point a quarter turn off the panel:
+    // a horizontal swipe on hardware read as vertical. Turn it back.
+    const uint16_t rx = *x > N ? N : *x, ry = *y > N ? N : *y;
+    const uint16_t tx = ry, ty = N - rx;
     switch (imu_hal_rotation_quadrant()) {
     case 1: *x = ty;     *y = N - tx; break;   // drawn (x,y) -> (N-y, x)
     case 2: *x = N - tx; *y = N - ty; break;   // drawn (x,y) -> (N-x, N-y)
     case 3: *x = N - ty; *y = tx;     break;   // drawn (x,y) -> (y, N-x)
-    default: break;
+    default: *x = tx;    *y = ty;     break;
     }
 }
 

@@ -93,10 +93,10 @@ impl AlertKind {
     /// Code's own (often long) notification text.
     pub fn device_text(self) -> &'static str {
         match self {
-            AlertKind::Question => "Question for you",
-            AlertKind::Permission | AlertKind::Other => "Permission needed!",
-            AlertKind::Idle => "Waiting for you!",
-            AlertKind::Elicitation => "MCP request!",
+            AlertKind::Question => "Pregunta para ti",
+            AlertKind::Permission | AlertKind::Other => "¡Necesita permiso!",
+            AlertKind::Idle => "¡Te está esperando!",
+            AlertKind::Elicitation => "¡Petición MCP!",
         }
     }
 }
@@ -441,7 +441,7 @@ mod tests {
         assert!(st.alert_unsent);
         assert_eq!(
             st.fields(false),
-            AttentionFields { beep: false, message: Some("Permission needed!".into()), clear: false }
+            AttentionFields { beep: false, message: Some("¡Necesita permiso!".into()), clear: false }
         );
         assert!(st.fields(true).beep);
         st.mark_sent();
@@ -498,12 +498,12 @@ mod tests {
             st.fields(false).message.unwrap()
         };
         let hook_text = "Claude needs your permission to use Bash";
-        assert_eq!(line(AlertKind::Question, "a", "Which file?"), "Question for you");
-        assert_eq!(line(AlertKind::Permission, "a", hook_text), "Permission needed!");
-        assert_eq!(line(AlertKind::Other, "a", hook_text), "Permission needed!");
-        assert_eq!(line(AlertKind::Idle, "a", "Claude is waiting for your input"), "Waiting for you!");
-        assert_eq!(line(AlertKind::Elicitation, "a", hook_text), "MCP request!");
-        assert_eq!(line(AlertKind::Permission, "a", ""), "Permission needed!", "a bare touch still says why");
+        assert_eq!(line(AlertKind::Question, "a", "Which file?"), "Pregunta para ti");
+        assert_eq!(line(AlertKind::Permission, "a", hook_text), "¡Necesita permiso!");
+        assert_eq!(line(AlertKind::Other, "a", hook_text), "¡Necesita permiso!");
+        assert_eq!(line(AlertKind::Idle, "a", "Claude is waiting for your input"), "¡Te está esperando!");
+        assert_eq!(line(AlertKind::Elicitation, "a", hook_text), "¡Petición MCP!");
+        assert_eq!(line(AlertKind::Permission, "a", ""), "¡Necesita permiso!", "a bare touch still says why");
         assert_eq!(line(AlertKind::Permission, TEST_SESSION, "Clawdmeter test alert"), "Clawdmeter test alert");
     }
 

@@ -85,3 +85,32 @@ size_t Preferences::putUChar(const char* key, uint8_t value) {
         }
     return 0;
 }
+
+static struct { char key[16]; char val[72]; bool used; } str_store[8];
+
+size_t Preferences::getString(const char* key, char* value, size_t max_len) {
+    for (auto& s : str_store)
+        if (s.used && strcmp(s.key, key) == 0) {
+            snprintf(value, max_len, "%s", s.val);
+            return strlen(value) + 1;
+        }
+    return 0;
+}
+size_t Preferences::putString(const char* key, const char* value) {
+    for (auto& s : str_store)
+        if (s.used && strcmp(s.key, key) == 0) { snprintf(s.val, sizeof(s.val), "%s", value); return strlen(value); }
+    for (auto& s : str_store)
+        if (!s.used) {
+            s.used = true;
+            snprintf(s.key, sizeof(s.key), "%s", key);
+            snprintf(s.val, sizeof(s.val), "%s", value);
+            return strlen(value);
+        }
+    return 0;
+}
+bool Preferences::remove(const char* key) {
+    bool found = false;
+    for (auto& s : str_store) if (s.used && strcmp(s.key, key) == 0) { s.used = false; found = true; }
+    for (auto& s : store)     if (s.used && strcmp(s.key, key) == 0) { s.used = false; found = true; }
+    return found;
+}

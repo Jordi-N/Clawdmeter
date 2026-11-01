@@ -19,8 +19,8 @@ void ble_disconnect_all(void); // serial `disconnect`: drop every link
 bool ble_has_data(void);
 // The latest payload, copied for the caller; valid until the next call.
 const char* ble_get_data(void);
-void ble_send_ack(void);
-void ble_send_nack(void);
+// Any JSON line on TX (notify), e.g. the WiFi status; dropped when not connected.
+void ble_send_line(const char* line);
 void ble_send_dismiss(void);   // TX {"dismiss":true}: the user ended the alert on the device
 void ble_request_refresh(void);
 

@@ -575,8 +575,15 @@ mod tests {
         }
         assert!(fw.contains("s") && fw.contains("ok"), "parser keys found: {fw:?}");
         let ours: BTreeSet<String> = PAYLOAD_KEYS.iter().map(|s| s.to_string()).collect();
+        // The WiFi transport's keys live outside the payload: `auth` (TCP
+        // handshake) and `wifi` (provisioning) are sent by the transport, and
+        // the firmware writes its status fields with the same `doc[...]` syntax.
+        let transport: BTreeSet<&str> = crate::wifi::TRANSPORT_KEYS.into_iter().chain(["st", "ip", "ssid"]).collect();
         for k in &fw {
-            assert!(ours.contains(k), "firmware reads {k:?}, which the payload never sends");
+            assert!(
+                ours.contains(k) || transport.contains(k.as_str()),
+                "firmware reads {k:?}, which the payload never sends"
+            );
         }
         for k in &ours {
             assert!(

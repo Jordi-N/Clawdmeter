@@ -12,6 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::paths::Paths;
+use crate::wifi::{is_key, Connection, Secret};
 
 /// Default seconds between `/usage` polls while a session is working
 /// (`cadence::Cadence::default().working`).
@@ -266,6 +267,15 @@ pub struct Settings {
     pub attention_anim: AttentionAnim,
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
+    /// Which link to use (`connection`, default Bluetooth only).
+    pub connection: Connection,
+    /// `wifi_host`: the device's address, used instead of mDNS (testing
+    /// against the simulator, or networks without multicast).
+    pub wifi_host: Option<String>,
+    /// `wifi_key`: the TCP key the app gave the device when provisioning.
+    pub wifi_key: Option<Secret>,
+    /// `wifi_ssid`: the network last sent to the device (prefills the form).
+    pub wifi_ssid: Option<String>,
 }
 
 /// `alert_on`: the alert kinds that show, as a comma list of `permission`,
@@ -394,6 +404,10 @@ impl Settings {
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
+            connection: cfg.get("connection").map(Connection::parse).unwrap_or_default(),
+            wifi_host: cfg.get("wifi_host").filter(|s| !s.is_empty()).map(str::to_owned),
+            wifi_key: cfg.get("wifi_key").filter(|s| is_key(s)).map(|s| Secret(s.to_owned())),
+            wifi_ssid: cfg.get("wifi_ssid").filter(|s| !s.is_empty()).map(str::to_owned),
         }
     }
 
@@ -485,6 +499,14 @@ impl Settings {
         if current.attention_anim != self.attention_anim {
             cfg.set("attention_anim", self.attention_anim.as_str());
         }
+        if current.connection != self.connection {
+            cfg.set("connection", self.connection.as_str());
+        }
+    }
+
+    /// WiFi is the user's choice and the device has a key to log in with.
+    pub fn wifi_ready(&self) -> bool {
+        self.connection == Connection::Wifi && self.wifi_key.is_some()
     }
 }
 
@@ -667,6 +689,26 @@ mod tests {
         s.pace_marker = true;
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("pace_marker"), Some("on"));
+    }
+
+    #[test]
+    fn wifi_keys() {
+        let s = settings("");
+        assert_eq!((s.connection, &s.wifi_host, &s.wifi_key), (Connection::Ble, &None, &None));
+        assert!(!s.wifi_ready());
+        let s = settings("connection = wifi\nwifi_host = 127.0.0.1\nwifi_key = 0123456789abcdef0123456789abcdef\n");
+        assert!(s.wifi_ready());
+        assert_eq!(s.wifi_host.as_deref(), Some("127.0.0.1"));
+        assert!(settings("wifi_key = short\n").wifi_key.is_none(), "a malformed key is ignored");
+        assert!(!settings("connection = wifi\n").wifi_ready(), "no key: not provisioned yet");
+
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("connection").is_none(), "the default stays out of the file");
+        s.connection = Connection::Wifi;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("connection"), Some("wifi"));
     }
 
     #[test]

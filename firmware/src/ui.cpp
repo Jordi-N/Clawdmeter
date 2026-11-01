@@ -141,6 +141,7 @@ static const char* const anim_messages[] = {
     "Muauding", "Conjuring", "Considering", "Desdanieling",
     "Cooking", "Francesing", "Crafting", "Transmuting",
     "Deliberating", "Wandering", "Wizarding", "Working",
+    "Al agua hirviendo",
 };
 #define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 

@@ -145,8 +145,10 @@ const char* ble_get_data(void) {
     if (strstr(out, "\"es\"")) es_delivered = true;
     return out;
 }
-void ble_send_ack(void)  {}
-void ble_send_nack(void) { printf("[sim] payload NACKed — check the scenario JSON\n"); }
+void ble_send_line(const char* line) {
+    if (strcmp(line, "{\"err\":true}") == 0) printf("[sim] payload NACKed — check the scenario JSON\n");
+    else if (connected && strcmp(line, "{\"ack\":true}") != 0) printf("[sim] TX %s\n", line);
+}
 void ble_request_refresh(void) {}
 void ble_send_dismiss(void) { printf("[sim] TX {\"dismiss\":true}\n"); }
 void ble_set_battery_level(int pct) { (void)pct; }

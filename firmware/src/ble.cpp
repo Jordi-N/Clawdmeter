@@ -476,16 +476,10 @@ const char* ble_get_data(void) {
     return parse_buf;
 }
 
-void ble_send_ack(void) {
+// Acks ({"ack":true} / {"err":true}) and the WiFi status go through here.
+void ble_send_line(const char* line) {
     if (state == BLE_STATE_CONNECTED && tx_char) {
-        tx_char->setValue("{\"ack\":true}");
-        tx_char->notify();
-    }
-}
-
-void ble_send_nack(void) {
-    if (state == BLE_STATE_CONNECTED && tx_char) {
-        tx_char->setValue("{\"err\":true}");
+        tx_char->setValue(line);
         tx_char->notify();
     }
 }

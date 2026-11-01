@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use clawdmeter_core::autostart::{self, LaunchMode};
 use clawdmeter_core::config::{AlertOn, AttentionAnim, ClockMode, ConfigFile, LIVELINESS_MAX};
+use clawdmeter_core::wifi::{Connection, Secret, Transport};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, FirmwareInfo};
 use gpui::{div, img, prelude::*, px, Context, EventEmitter, PathPromptOptions, SharedString, Window};
@@ -104,6 +105,51 @@ pub struct SettingsView {
     /// The Settings page's Advanced section is open.
     advanced: bool,
     ticks: u32,
+    /// The WiFi form: network name and password (never saved).
+    wifi_ssid: String,
+    wifi_pass: String,
+    ssid_focus: gpui::FocusHandle,
+    pass_focus: gpui::FocusHandle,
+    /// The network name was prefilled (once per window).
+    wifi_prefilled: bool,
+}
+
+/// The WiFi form's text boxes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WifiField {
+    Ssid,
+    Pass,
+}
+
+/// The WiFi section's status line.
+fn wifi_line(snap: Option<&StatusSnapshot>, s: &Settings) -> (Tone, String) {
+    let Some(snap) = snap else { return (Tone::Plain, "Clawdmeter no se está ejecutando".into()) };
+    match (snap.link.as_str(), snap.transport) {
+        ("connected", Some(Transport::Wifi)) => match &snap.wifi_addr {
+            Some(ip) => (Tone::Ok, format!("Conectado por WiFi ({ip})")),
+            None => (Tone::Ok, "Conectado por WiFi".into()),
+        },
+        ("connected", _) if snap.wifi_fallback => (Tone::Warn, "WiFi no disponible, usando Bluetooth".into()),
+        ("connected", _) if s.connection == Connection::Wifi && s.wifi_key.is_none() => {
+            (Tone::Ok, "Conectado por Bluetooth · envía una red al aparato para usar WiFi".into())
+        }
+        ("connected", _) => (Tone::Ok, "Conectado por Bluetooth".into()),
+        _ => (Tone::Plain, "Sin conexión con el aparato".into()),
+    }
+}
+
+/// What the device says about its own WiFi.
+fn device_wifi_text(w: &clawdmeter_core::wifi::WifiStatus) -> String {
+    let net = w.ssid.as_deref().map(|s| format!(" a {s}")).unwrap_or_default();
+    match w.st.as_str() {
+        "ok" => match &w.ip {
+            Some(ip) => format!("El aparato está conectado{net} ({ip})."),
+            None => format!("El aparato está conectado{net}."),
+        },
+        "connecting" => format!("El aparato se está conectando{net}…"),
+        "fail" => format!("El aparato no pudo conectarse{net}. Revisa la contraseña y que la red sea de 2,4 GHz."),
+        _ => "El WiFi del aparato está apagado.".into(),
+    }
 }
 
 impl EventEmitter<Navigate> for SettingsView {}
@@ -147,6 +193,11 @@ impl SettingsView {
             notice: None,
             advanced: false,
             ticks: 0,
+            wifi_ssid: String::new(),
+            wifi_pass: String::new(),
+            ssid_focus: cx.focus_handle(),
+            pass_focus: cx.focus_handle(),
+            wifi_prefilled: false,
         };
         v.reload();
         v.show(page, false, cx);
@@ -165,6 +216,19 @@ impl SettingsView {
         self.reload();
         if page == Page::Device && self.usb && !self.device.probing && self.device.port.is_none() {
             self.probe_device(cx);
+        }
+        if page == Page::Device && !self.wifi_prefilled {
+            self.wifi_prefilled = true;
+            match self.settings.wifi_ssid.clone() {
+                Some(s) => self.wifi_ssid = s,
+                // The network this computer is on (Windows); not in tests.
+                None if self.usb => run_blocking(cx, crate::transport::current_ssid, |v, ssid, _| {
+                    if let (Some(s), true) = (ssid, v.wifi_ssid.is_empty()) {
+                        v.wifi_ssid = s;
+                    }
+                }),
+                None => {}
+            }
         }
         cx.notify();
     }
@@ -455,7 +519,7 @@ impl SettingsView {
 
     // ---------------------------------------------------------------- panes
 
-    fn device_pane(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+    fn device_pane(&mut self, t: &Theme, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let snap = self.snap.clone();
         let rec = ipc::load_firmware_record(&self.paths);
         let env = self.device.info.as_ref().map(|i| i.env.clone()).or_else(|| rec.as_ref().map(|r| r.env.clone()));
@@ -484,6 +548,7 @@ impl SettingsView {
         let (link_tone, link): (Tone, SharedString) = match snap.as_ref() {
             None => (Tone::Plain, "Clawdmeter no se está ejecutando".into()),
             Some(s) => match s.link.as_str() {
+                "connected" if s.transport == Some(Transport::Wifi) => (Tone::Ok, "WiFi conectado".into()),
                 "connected" => (Tone::Ok, "Bluetooth conectado".into()),
                 "no_adapter" => (Tone::Bad, "Bluetooth no disponible".into()),
                 "connecting" => (Tone::Accent, "Conectando…".into()),
@@ -705,7 +770,144 @@ impl SettingsView {
         if let Some((tone, msg)) = &self.device.unpair {
             pane = pane.child(notice(t, *tone, msg.clone()));
         }
+        self.wifi_section(t, window, pane, cx)
+    }
+
+    /// The Device page's WiFi section: the link choice, its state, and the
+    /// form that sends a network to the device over Bluetooth.
+    fn wifi_section(&mut self, t: &Theme, window: &Window, pane: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        let snap = self.snap.as_ref();
+        let me = cx.entity().downgrade();
+        let (tone, line) = wifi_line(snap, &self.settings);
+        let mut pane = pane
+            .child(div().pt(px(18.)).child(subheading(t, "WiFi")))
+            .child(para(
+                t,
+                "Para cuando el Bluetooth no llega: el aparato se une a tu red y la app le habla por ella. Necesita \
+                 una placa con WiFi y el firmware de esta edición.",
+            ))
+            .child(field(
+                t,
+                "Conexión",
+                "Con WiFi, el Bluetooth queda de respaldo. Solo Bluetooth apaga el WiFi del aparato para ahorrar batería.",
+                segmented(
+                    t,
+                    "connection",
+                    &[(Connection::Wifi, "WiFi (Bluetooth de respaldo)"), (Connection::Ble, "Solo Bluetooth")],
+                    &self.settings.connection,
+                    true,
+                    move |c, _, cx| {
+                        let _ = me.update(cx, |v, cx| {
+                            v.save(|s, _| s.connection = c);
+                            cx.notify();
+                        });
+                    },
+                ),
+            ))
+            .child(div().flex().flex_wrap().gap(px(6.)).py(px(10.)).child(pill(t, line, tone)))
+            .when_some(snap.and_then(|s| s.wifi.as_ref()).map(device_wifi_text), |d, text| {
+                d.child(caption(t, text))
+            });
+        let ssid_box = self.text_box(t, window, WifiField::Ssid, cx);
+        let pass_box = self.text_box(t, window, WifiField::Pass, cx);
+        pane = pane.child(field(t, "Red", "El nombre de la red WiFi (2,4 GHz).", ssid_box)).child(field(
+            t,
+            "Contraseña",
+            "Se envía al aparato y no se guarda en este ordenador.",
+            pass_box,
+        ));
+        let on_ble = snap.is_some_and(|s| s.link == "connected" && s.transport == Some(Transport::Ble));
+        let ready = on_ble && !self.wifi_ssid.trim().is_empty();
+        let (p, ssid, pass) = (self.paths.clone(), self.wifi_ssid.trim().to_owned(), self.wifi_pass.clone());
+        pane = pane.child(field(
+            t,
+            "Enviar al aparato",
+            if on_ble {
+                "Le pasa la red por Bluetooth. Después usa WiFi en cuanto la encuentra."
+            } else {
+                "Hace falta que el aparato esté conectado por Bluetooth."
+            },
+            button(t, "wifi-send", "Enviar al aparato", ButtonKind::Small, ready, move |_, _, _| {
+                command(&p, AppCommand::WifiSend { ssid: ssid.clone(), pass: Secret(pass.clone()) })
+            }),
+        ));
+        if let Some(msg) = snap.and_then(|s| s.wifi_send.clone()) {
+            let tone = match snap.and_then(|s| s.wifi_send_ok) {
+                Some(true) => Tone::Ok,
+                Some(false) => Tone::Bad,
+                None => Tone::Accent,
+            };
+            pane = pane.child(div().pt(px(8.)).child(notice(t, tone, msg)));
+        }
         pane
+    }
+
+    /// A one-line text box: click to focus, type, Backspace, Ctrl/Cmd+V.
+    /// shortcut: no cursor movement, selection or IME; enough for a network
+    /// name and password. Upgrade to a real input if the app needs more text.
+    fn text_box(&self, t: &Theme, window: &Window, which: WifiField, cx: &mut Context<Self>) -> impl IntoElement {
+        let (handle, value, id, placeholder) = match which {
+            WifiField::Ssid => (&self.ssid_focus, &self.wifi_ssid, "wifi-ssid", "Nombre de la red"),
+            WifiField::Pass => (&self.pass_focus, &self.wifi_pass, "wifi-pass", "Contraseña"),
+        };
+        let focused = handle.is_focused(window);
+        let shown: SharedString = match (value.is_empty(), which) {
+            (true, _) => placeholder.into(),
+            (false, WifiField::Pass) => "•".repeat(value.chars().count()).into(),
+            (false, WifiField::Ssid) => value.clone().into(),
+        };
+        let h = handle.clone();
+        div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .track_focus(handle)
+            .flex()
+            .items_center()
+            .w(px(240.))
+            .h(px(30.))
+            .px(px(10.))
+            .rounded(px(R_S))
+            .border_1()
+            .border_color(if focused { t.accent } else { t.line })
+            .bg(t.surface)
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(px(13.))
+            .text_color(if value.is_empty() { t.mute } else { t.text })
+            .cursor_text()
+            .on_click(cx.listener(move |_, _, window, cx| {
+                window.focus(&h);
+                cx.notify();
+            }))
+            .on_key_down(cx.listener(move |v, e: &gpui::KeyDownEvent, _, cx| v.type_key(which, e, cx)))
+            .child(shown)
+            .when(focused, |d| d.child(div().ml(px(1.)).w(px(1.)).h(px(16.)).bg(t.text)))
+    }
+
+    fn type_key(&mut self, which: WifiField, e: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let k = &e.keystroke;
+        let command_key = k.modifiers.control || k.modifiers.platform;
+        let (text, max) = match which {
+            WifiField::Ssid => (&mut self.wifi_ssid, 32),
+            WifiField::Pass => (&mut self.wifi_pass, 63),
+        };
+        if k.key == "backspace" {
+            text.pop();
+        } else if command_key && k.key == "v" {
+            if let Some(s) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                text.push_str(s.trim_end_matches(['\r', '\n']));
+            }
+        } else if let (false, Some(c)) = (command_key, &k.key_char) {
+            text.push_str(c);
+        } else {
+            return;
+        }
+        // The device's limits, in bytes.
+        while text.len() > max {
+            text.pop();
+        }
+        cx.stop_propagation();
+        cx.notify();
     }
 
     fn accounts_pane(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
@@ -1349,7 +1551,7 @@ impl Render for SettingsView {
             Page::Accounts => self.accounts_pane(&t, cx),
             Page::Hooks => self.hooks_pane(&t, cx),
             Page::Settings => self.settings_pane(&t, cx),
-            _ => self.device_pane(&t, cx),
+            _ => self.device_pane(&t, window, cx),
         };
         if let Some(e) = self.config_error.clone().or_else(|| self.notice.as_ref().map(|(_, m)| m.clone())) {
             pane = pane.child(div().pt(px(12.)).text_size(px(13.)).text_color(t.bad).child(e));

@@ -19,6 +19,7 @@ pub mod hooks;
 pub mod ipc;
 pub mod logger;
 pub mod onboarding;
+pub mod transport;
 pub mod tray;
 pub mod ui;
 

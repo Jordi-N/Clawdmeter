@@ -38,6 +38,7 @@ pub mod probe;
 pub mod rate;
 pub mod selector;
 pub mod usage;
+pub mod wifi;
 
 pub use config::{ConfigFile, Settings};
 pub use engine::{AccountError, Engine, EngineStatus, HostClock, PollPlan, Write, WriteKind};

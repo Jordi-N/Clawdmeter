@@ -39,8 +39,9 @@ SignalsUpdate signals_ingest_at(const UsageData* d, uint32_t now_ms) {
     if (d->has_event_seq) {
         hooks_seen = true;
         if (!have_seq) {
-            have_seq = true;                 // baseline, don't react
+            have_seq = true;                 // baseline, don't react...
             last_seq = d->event_seq;
+            last_event = d->event;           // ...but remember the state (a stop must still read as paused)
         } else if (d->event_seq != last_seq) {
             // Fires on a replay too: `rp` only says the usage numbers are
             // repeated. The app sends a fresh event in an `rp:1` write ahead

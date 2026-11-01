@@ -60,6 +60,8 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+pub use clawdmeter_core::wifi::WifiStatus;
+use clawdmeter_core::wifi::{parse_device_line, DeviceLine};
 pub use clawdmeter_core::DEVICE_NAME;
 
 /// Custom data service.
@@ -482,13 +484,16 @@ pub fn pinned_address() -> Option<String> {
 }
 
 /// What the device asks or tells the app through its notifications.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeviceEvent {
-    /// REQ: it has no data yet and wants a payload.
+    /// REQ (or `{"req":true}` over TCP): it has no data yet and wants a
+    /// payload.
     Refresh,
     /// TX `{"dismiss":true}`: the alert ended on the device (a tap, or its
     /// own timeout).
     Dismissed,
+    /// TX `{"wifi":{...}}`: its WiFi state (fork firmware only).
+    Wifi(WifiStatus),
 }
 
 /// The device's events, in order.
@@ -503,8 +508,18 @@ pub fn device_event(uuid: Uuid, value: &[u8]) -> Option<DeviceEvent> {
     if uuid != TX_UUID {
         return None;
     }
-    let text: String = std::str::from_utf8(value).ok()?.chars().filter(|c| !c.is_whitespace()).collect();
-    text.contains("\"dismiss\":true").then_some(DeviceEvent::Dismissed)
+    line_event(std::str::from_utf8(value).ok()?)
+}
+
+/// Read one JSON line from the device, as TX carries it or the TCP link
+/// receives it.
+pub fn line_event(text: &str) -> Option<DeviceEvent> {
+    match parse_device_line(text)? {
+        DeviceLine::Refresh => Some(DeviceEvent::Refresh),
+        DeviceLine::Dismissed => Some(DeviceEvent::Dismissed),
+        DeviceLine::Wifi(s) => Some(DeviceEvent::Wifi(s)),
+        DeviceLine::AuthOk => None,
+    }
 }
 
 /// An open GATT link.
@@ -906,6 +921,12 @@ mod tests {
         assert_eq!(device_event(TX_UUID, br#"{"err":true}"#), None);
         assert_eq!(device_event(TX_UUID, &[0xff, 0xfe]), None);
         assert_eq!(device_event(RX_UUID, br#"{"dismiss":true}"#), None);
+        assert_eq!(
+            device_event(TX_UUID, br#"{"wifi":{"st":"connecting","ssid":"Mi casa"}}"#),
+            Some(DeviceEvent::Wifi(WifiStatus { st: "connecting".into(), ip: None, ssid: Some("Mi casa".into()) }))
+        );
+        assert_eq!(line_event(r#"{"req":true}"#), Some(DeviceEvent::Refresh));
+        assert_eq!(line_event(r#"{"auth":"ok"}"#), None);
         // The firmware's reply, as written.
         let src = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../firmware/src/ble.cpp"),
