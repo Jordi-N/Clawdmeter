@@ -202,7 +202,7 @@ seconds and preserves comments and unknown keys when saving.
 | `claude_path` | found on `PATH` | Full path to the Claude Code executable, if detection fails. |
 | `update_check` | `on` | Check for firmware releases daily. |
 | `alert_on` | `permission, question, elicitation` | Which waits alert on the device and tray: `permission`, `question`, `idle`, `elicitation` (MCP input), or `none`. Set on the Hooks page. Other notification types follow `permission`. |
-| `release_repo` | `HermannBjorgvin/Clawdmeter` | GitHub repository used for firmware releases. |
+| `release_repo` | `Jordi-N/Clawdmeter` | GitHub repository used for firmware releases. |
 | `onboarding_done` | unset | `true` after setup is finished or skipped. |
 
 **Mute chimes** in the tray silences the alert chime and the desktop chime

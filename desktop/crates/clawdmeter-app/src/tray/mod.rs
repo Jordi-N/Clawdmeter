@@ -78,16 +78,16 @@ impl Items {
     fn new() -> Self {
         let it = Items {
             menu: Menu::new(),
-            status: MenuItem::new("Clawdmeter · Starting", false, None),
-            account: MenuItem::new("No usage data yet", false, None),
-            session: MenuItem::new("Session  –", false, None),
-            weekly: MenuItem::new("Weekly  –", false, None),
-            refresh: MenuItem::new("Refresh usage", true, None),
-            mute: CheckMenuItem::new("Mute chimes", true, false, None),
-            open: MenuItem::new("Open Clawdmeter", true, None),
-            update: MenuItem::new("Flash firmware…", true, None),
-            settings: MenuItem::new("Settings…", true, None),
-            quit: MenuItem::new("Quit Clawdmeter", true, None),
+            status: MenuItem::new("Clawdmeter · Iniciando", false, None),
+            account: MenuItem::new("Aún no hay datos de uso", false, None),
+            session: MenuItem::new("Sesión  –", false, None),
+            weekly: MenuItem::new("Semana  –", false, None),
+            refresh: MenuItem::new("Actualizar uso", true, None),
+            mute: CheckMenuItem::new("Silenciar sonidos", true, false, None),
+            open: MenuItem::new("Abrir Clawdmeter", true, None),
+            update: MenuItem::new("Grabar firmware…", true, None),
+            settings: MenuItem::new("Ajustes…", true, None),
+            quit: MenuItem::new("Salir de Clawdmeter", true, None),
         };
         let _ = it.menu.append_items(&[
             &it.status,
@@ -112,30 +112,30 @@ impl Items {
         let state = snap.tray_state();
         let mut label = state.label().to_owned();
         if snap.link == "no_adapter" {
-            label = "Bluetooth unavailable".into();
+            label = "Bluetooth no disponible".into();
         }
         self.status.set_text(format!("Clawdmeter · {label}"));
         let account = snap.account.as_deref().map(|a| tilde(a, &paths.home));
         self.account.set_text(match (account, snap.age(now)) {
-            (Some(a), Some(age)) => format!("{a} · updated {}", ago(age)),
+            (Some(a), Some(age)) => format!("{a} · actualizado {}", ago(age)),
             (Some(a), None) => a,
-            (None, _) if snap.logged_out => "Open Claude Code to sign in".into(),
-            (None, _) => "No usage data yet".into(),
+            (None, _) if snap.logged_out => "Abre Claude Code para iniciar sesión".into(),
+            (None, _) => "Aún no hay datos de uso".into(),
         });
         self.session.set_text(match snap.session_pct {
-            Some(p) if snap.window_started => format!("Session  {p}%"),
-            Some(_) => "Session  not started".into(),
-            None => "Session  –".into(),
+            Some(p) if snap.window_started => format!("Sesión  {p}%"),
+            Some(_) => "Sesión  sin empezar".into(),
+            None => "Sesión  –".into(),
         });
         self.weekly.set_text(match snap.week_pct {
-            Some(p) => format!("Weekly  {p}%"),
-            None => "Weekly  –".into(),
+            Some(p) => format!("Semana  {p}%"),
+            None => "Semana  –".into(),
         });
         self.mute.set_checked(snap.chimes_muted);
         self.mute.set_enabled(chimes_on);
         self.update.set_text(match snap.update_available() {
-            Some(v) => format!("Update firmware to {}…", display_version(v)),
-            None => "Flash firmware…".into(),
+            Some(v) => format!("Actualizar firmware a {}…", display_version(v)),
+            None => "Grabar firmware…".into(),
         });
     }
 }
@@ -155,7 +155,7 @@ fn icon_for(state: TrayState) -> Option<Icon> {
 fn tooltip(snap: &StatusSnapshot) -> String {
     let mut t = format!("Clawdmeter · {}", snap.tray_state().label());
     if let (Some(s), Some(w)) = (snap.session_pct, snap.week_pct) {
-        t.push_str(&format!(" · Session {s}% · Weekly {w}%"));
+        t.push_str(&format!(" · Sesión {s}% · Semana {w}%"));
     }
     t
 }

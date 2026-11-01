@@ -211,7 +211,7 @@ impl SettingsView {
             }
             Err(e) => {
                 self.config_error = Some(format!(
-                    "Couldn't read {}: {e}",
+                    "No se pudo leer {}: {e}",
                     tilde(&self.paths.config_file.display().to_string(), &self.paths.home)
                 ))
             }
@@ -224,7 +224,7 @@ impl SettingsView {
                 dir: d.clone(),
                 status: match &self.hook_exe {
                     Some(exe) => hooks::dir_status(d, exe),
-                    None => HookStatus::Unreadable("Couldn't locate the Clawdmeter executable.".into()),
+                    None => HookStatus::Unreadable("No se encontró el ejecutable de Clawdmeter.".into()),
                 },
             })
             .collect();
@@ -264,7 +264,7 @@ impl SettingsView {
         let path = self.paths.config_file.clone();
         match write_settings(&self.paths, change) {
             Ok(()) => self.notice = None,
-            Err(e) => self.notice = Some((Tone::Bad, errors::save_failed("settings", &path, &self.paths.home, &e))),
+            Err(e) => self.notice = Some((Tone::Bad, errors::save_failed("los ajustes", &path, &self.paths.home, &e))),
         }
         self.reload();
     }
@@ -305,13 +305,14 @@ impl SettingsView {
                 v.device.unpair = Some(match r {
                     Ok(Some(_)) => (
                         Tone::Ok,
-                        "The board's pairing is cleared. Remove Clawdmeter from this computer's Bluetooth settings, \
-                         then pair it again."
+                        "Se borró el emparejamiento de la placa. Quita Clawdmeter de los ajustes de Bluetooth de este \
+                         ordenador y vuelve a emparejarla."
                             .into(),
                     ),
                     Ok(None) => (
                         Tone::Bad,
-                        "No response from the device. Reconnect USB or update the firmware, then try again.".into(),
+                        "El dispositivo no responde. Vuelve a conectar el USB o actualiza el firmware y reinténtalo."
+                            .into(),
                     ),
                     Err(e) => (Tone::Bad, e.to_string()),
                 });
@@ -324,7 +325,7 @@ impl SettingsView {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Add Claude Code account folder".into()),
+            prompt: Some("Añadir carpeta de cuenta de Claude Code".into()),
         });
         cx.spawn(async move |this, cx| {
             if let Ok(Ok(Some(paths))) = rx.await {
@@ -344,10 +345,10 @@ impl SettingsView {
     /// The binary to set the hooks (`hooks`) or the login entry up with,
     /// or why not.
     fn launchable(&self, hooks: bool) -> Result<PathBuf, String> {
-        let missing = || "Couldn't locate the Clawdmeter executable.".to_owned();
+        let missing = || "No se encontró el ejecutable de Clawdmeter.".to_owned();
         let exe = self.launch_exe.clone().ok_or_else(missing)?;
         if let Some(u) = clawdmeter_core::launch::unstable(&exe) {
-            return Err(format!("Clawdmeter is running from {}. {}", u.location_noun(), u.advice()));
+            return Err(format!("Clawdmeter se está ejecutando desde {}. {}", u.location_noun(), u.advice()));
         }
         if hooks {
             self.hook_exe.clone().ok_or_else(missing)
@@ -387,7 +388,7 @@ impl SettingsView {
             }
         }
         if plans.is_empty() {
-            self.hook_msg = Some((Tone::Ok, "No changes needed.".into()));
+            self.hook_msg = Some((Tone::Ok, "No hace falta ningún cambio.".into()));
         } else {
             self.preview = Some(HookPreview { action, plans });
         }
@@ -402,24 +403,24 @@ impl SettingsView {
                 let what = tilde(&plan.path.display().to_string(), &self.paths.home);
                 let saved = match done {
                     0 => String::new(),
-                    1 => " 1 other file was already saved.".into(),
-                    n => format!(" {n} other files were already saved."),
+                    1 => " Otro archivo ya se había guardado.".into(),
+                    n => format!(" Otros {n} archivos ya se habían guardado."),
                 };
-                self.hook_msg = Some((Tone::Bad, format!("Couldn't write {what}. {e}{saved}")));
+                self.hook_msg = Some((Tone::Bad, format!("No se pudo escribir {what}. {e}{saved}")));
                 self.reload();
                 return;
             }
             done += 1;
         }
-        let accounts = if done == 1 { "1 account".to_string() } else { format!("{done} accounts") };
+        let accounts = if done == 1 { "1 cuenta".to_string() } else { format!("{done} cuentas") };
         self.hook_msg = Some((
             Tone::Ok,
             match p.action {
                 HookAction::Install => {
-                    format!("Hooks installed in {accounts}. Your original settings are kept in settings.json.bak.")
+                    format!("Hooks instalados en {accounts}. Tus ajustes originales se guardan en settings.json.bak.")
                 }
                 HookAction::Remove => {
-                    format!("Hooks removed from {accounts}. Your original settings are kept in settings.json.bak.")
+                    format!("Hooks quitados de {accounts}. Tus ajustes originales se guardan en settings.json.bak.")
                 }
             },
         ));
@@ -428,13 +429,14 @@ impl SettingsView {
 
     fn send_test_alert(&mut self, cx: &mut Context<Self>) {
         let path = self.paths.attention_file();
-        let body = serde_json::json!({"m": "Clawdmeter test alert", "s": clawdmeter_core::attention::TEST_SESSION});
+        let body =
+            serde_json::json!({"m": "Alerta de prueba de Clawdmeter", "s": clawdmeter_core::attention::TEST_SESSION});
         let written =
             std::fs::create_dir_all(&self.paths.state_dir).and_then(|_| std::fs::write(&path, body.to_string()));
         self.test_alert = Some(match written {
-            Ok(()) if self.snap.is_none() => Err("Clawdmeter isn't running.".into()),
+            Ok(()) if self.snap.is_none() => Err("Clawdmeter no se está ejecutando.".into()),
             Ok(()) => Ok(()),
-            Err(e) => Err(format!("Couldn't send it. {}", errors::io_message(&e))),
+            Err(e) => Err(format!("No se pudo enviar. {}", errors::io_message(&e))),
         });
         self.test_alert_seq += 1;
         let seq = self.test_alert_seq;
@@ -468,46 +470,46 @@ impl SettingsView {
         let name: SharedString = match (board, &env) {
             (Some(b), _) => b.name.into(),
             (None, Some(e)) => e.clone().into(),
-            (None, None) => "Board not identified".into(),
+            (None, None) => "Placa sin identificar".into(),
         };
         // Without a live USB answer, the identity is what was last seen.
         let cached = self.device.info.is_none() && env.is_some();
         let detail: Option<SharedString> = match (board, cached) {
-            (Some(b), true) => Some(format!("{} · last detected", b.product).into()),
+            (Some(b), true) => Some(format!("{} · última detección", b.product).into()),
             (Some(b), false) => Some(b.product.into()),
-            (None, true) => Some("Last detected".into()),
+            (None, true) => Some("Última detección".into()),
             (None, false) => None,
         };
         let update = snap.as_ref().and_then(|s| s.update_available().map(str::to_owned));
         let (link_tone, link): (Tone, SharedString) = match snap.as_ref() {
-            None => (Tone::Plain, "Clawdmeter isn't running".into()),
+            None => (Tone::Plain, "Clawdmeter no se está ejecutando".into()),
             Some(s) => match s.link.as_str() {
-                "connected" => (Tone::Ok, "Bluetooth connected".into()),
-                "no_adapter" => (Tone::Bad, "Bluetooth unavailable".into()),
-                "connecting" => (Tone::Accent, "Connecting…".into()),
-                _ => (Tone::Plain, "Looking for Clawdmeter".into()),
+                "connected" => (Tone::Ok, "Bluetooth conectado".into()),
+                "no_adapter" => (Tone::Bad, "Bluetooth no disponible".into()),
+                "connecting" => (Tone::Accent, "Conectando…".into()),
+                _ => (Tone::Plain, "Buscando Clawdmeter".into()),
             },
         };
         let usb: SharedString = match (&self.device.port, self.device.probing) {
-            (_, true) => "Checking USB…".into(),
+            (_, true) => "Comprobando USB…".into(),
             (Some(p), _) => format!("USB: {p}").into(),
-            (None, _) if board.is_none() => "Connect USB to identify the board.".into(),
-            (None, _) => "USB not connected".into(),
+            (None, _) if board.is_none() => "Conecta el USB para identificar la placa.".into(),
+            (None, _) => "USB no conectado".into(),
         };
         let firmware: SharedString = match (&ver, &update) {
             (Some(v), Some(u)) => {
-                format!("Firmware v{} · v{} available", v.trim_start_matches('v'), u.trim_start_matches('v')).into()
+                format!("Firmware v{} · v{} disponible", v.trim_start_matches('v'), u.trim_start_matches('v')).into()
             }
             (Some(v), None) => format!("Firmware v{}", v.trim_start_matches('v')).into(),
-            (None, _) => "Firmware version unknown".into(),
+            (None, _) => "Versión de firmware desconocida".into(),
         };
         let art = div().flex().flex_shrink_0().items_center().justify_center().size(px(150.)).child(match board {
             Some(b) => img(b.illustration()).size(px(150.)).into_any_element(),
             None => super::widgets::clawd(4.).into_any_element(),
         });
         let (label, kind) = match &update {
-            Some(_) => ("Update firmware", ButtonKind::Primary),
-            None => ("Flash firmware…", ButtonKind::Normal),
+            Some(_) => ("Actualizar firmware", ButtonKind::Primary),
+            None => ("Grabar firmware…", ButtonKind::Normal),
         };
         let card = card(t).flex_row().items_center().gap(px(20.)).p(px(20.)).child(art).child(
             div()
@@ -540,19 +542,19 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .child(heading(t, "Device"))
+            .child(heading(t, "Dispositivo"))
             .child(div().pt(px(8.)).pb(px(10.)).child(card));
 
         let me = cx.entity().downgrade();
         pane = pane.child(field(
             t,
-            "Clock",
-            "Replaces the Usage title with a clock. Auto follows this computer's time format.",
+            "Reloj",
+            "Sustituye el título Uso por un reloj. Auto sigue el formato de hora de este ordenador.",
             segmented(
                 t,
                 "clock",
                 &[
-                    (ClockMode::Off, "Off"),
+                    (ClockMode::Off, "No"),
                     (ClockMode::Auto, "Auto"),
                     (ClockMode::H12, "12 h"),
                     (ClockMode::H24, "24 h"),
@@ -571,8 +573,8 @@ impl SettingsView {
         let level = self.settings.liveliness;
         pane = pane.child(field_stacked(
             t,
-            "Animation silliness",
-            "How lively Clawd is",
+            "Animación tontorrona",
+            "Lo animado que está Clawd",
             div()
                 .w_full()
                 .flex()
@@ -584,7 +586,7 @@ impl SettingsView {
                     "liveliness",
                     LIVELINESS_MAX,
                     level,
-                    &[(1, "No-nonsense"), (3, "Some-nonsense"), (5, "All-nonsense")],
+                    &[(1, "Sin tonterías"), (3, "Alguna tontería"), (5, "Todo tonterías")],
                     true,
                     move |level, _, cx| {
                         let _ = me.update(cx, |v, cx| {
@@ -605,8 +607,8 @@ impl SettingsView {
         let me = cx.entity().downgrade();
         pane = pane.child(field(
             t,
-            "Attention animation",
-            "How long Clawd points and waves when Claude needs you. The alert stays up either way.",
+            "Animación de aviso",
+            "Cuánto tiempo señala y saluda Clawd cuando Claude te necesita. La alerta sigue visible igualmente.",
             segmented(
                 t,
                 "attention-anim",
@@ -625,8 +627,8 @@ impl SettingsView {
         let pace = self.settings.pace_marker;
         pane = pane.child(field(
             t,
-            "Pace marker",
-            "Marks how far into the session and the week you are. Bars turn amber when usage is ahead of it.",
+            "Marcador de ritmo",
+            "Marca cuánto llevas de sesión y de semana. Las barras se ponen ámbar si el uso va por delante.",
             toggle(t, "pace-marker", pace, true, move |_, _, cx| {
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| s.pace_marker = !pace);
@@ -639,8 +641,8 @@ impl SettingsView {
         pane = pane
             .child(field(
                 t,
-                "Alert chime",
-                "Chimes when Claude needs you, on boards with a speaker. Mute from the tray until restart.",
+                "Sonido de alerta",
+                "Suena cuando Claude te necesita, en placas con altavoz. Silénciala desde la bandeja hasta reiniciar.",
                 toggle(t, "alert-chime", alert, true, move |_, _, cx| {
                     let _ = me1.update(cx, |v, cx| {
                         v.save(|s, _| s.alert_chime = !alert);
@@ -650,8 +652,8 @@ impl SettingsView {
             ))
             .child(field(
                 t,
-                "Session reset chime",
-                "Chimes when your session usage resets, on boards with a speaker.",
+                "Sonido de reinicio de sesión",
+                "Suena cuando se reinicia el uso de tu sesión, en placas con altavoz.",
                 toggle(t, "reset-chime", reset, true, move |_, _, cx| {
                     let _ = me2.update(cx, |v, cx| {
                         v.save(|s, _| s.reset_chime = !reset);
@@ -663,8 +665,8 @@ impl SettingsView {
         let on = self.settings.update_check;
         pane = pane.child(field(
             t,
-            "Check for firmware updates",
-            "Checks GitHub daily. Updates appear here and in the tray.",
+            "Buscar actualizaciones de firmware",
+            "Consulta GitHub a diario. Las actualizaciones aparecen aquí y en la bandeja.",
             toggle(t, "update-check", on, true, move |_, _, cx| {
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| s.update_check = !on);
@@ -675,23 +677,30 @@ impl SettingsView {
         let p = self.paths.clone();
         pane = pane.child(field(
             t,
-            "Clear saved device",
-            "Clears the app's saved address and searches for a paired Clawdmeter. Bluetooth pairing stays in place.",
-            button(t, "forget", "Clear", ButtonKind::Small, true, move |_, _, _| command(&p, AppCommand::Forget)),
+            "Olvidar dispositivo guardado",
+            "Borra la dirección guardada en la app y busca un Clawdmeter emparejado. El emparejamiento Bluetooth se mantiene.",
+            button(t, "forget", "Olvidar", ButtonKind::Small, true, move |_, _, _| command(&p, AppCommand::Forget)),
         ));
         let on_usb = self.device.port.is_some();
         let me = cx.entity().downgrade();
         pane = pane.child(field(
             t,
-            "Clear the board's pairing",
+            "Borrar el emparejamiento de la placa",
             if on_usb {
-                "Makes the board forget every computer it was paired with, so it can pair again."
+                "La placa olvida todos los ordenadores con los que se emparejó para poder emparejarse de nuevo."
             } else {
-                "Makes the board forget every computer it was paired with. Connect USB to use this."
+                "La placa olvida todos los ordenadores con los que se emparejó. Conecta el USB para usarlo."
             },
-            button(t, "unpair", "Clear pairing", ButtonKind::Small, on_usb && !self.device.busy, move |_, _, cx| {
-                let _ = me.update(cx, |v, cx| v.unpair(cx));
-            }),
+            button(
+                t,
+                "unpair",
+                "Borrar emparejamiento",
+                ButtonKind::Small,
+                on_usb && !self.device.busy,
+                move |_, _, cx| {
+                    let _ = me.update(cx, |v, cx| v.unpair(cx));
+                },
+            ),
         ));
         if let Some((tone, msg)) = &self.device.unpair {
             pane = pane.child(notice(t, *tone, msg.clone()));
@@ -705,10 +714,10 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(div().flex().items_center().justify_between().child(heading(t, "Accounts")).child(button(
+            .child(div().flex().items_center().justify_between().child(heading(t, "Cuentas")).child(button(
                 t,
                 "add-dir",
-                "Add account folder…",
+                "Añadir carpeta de cuenta…",
                 ButtonKind::Small,
                 true,
                 move |_, _, cx| {
@@ -717,17 +726,17 @@ impl SettingsView {
             )))
             .child(para(
                 t,
-                "The default Claude Code folder is ~/.claude. Add a config folder for each other account you want \
-                 to monitor. The device follows the account whose session usage increased most recently.",
+                "La carpeta predeterminada de Claude Code es ~/.claude. Añade una carpeta de configuración por cada \
+                 cuenta que quieras vigilar. El dispositivo sigue la cuenta cuyo uso de sesión subió más recientemente.",
             ))
             .when_some(self.snap.as_ref(), |d, snap| {
                 d.child(caption(
                     t,
                     match &snap.claude {
                         Some(c) => {
-                            format!("Usage is read with {}.", crate::claude_label(Path::new(c), &self.paths.home))
+                            format!("El uso se lee con {}.", crate::claude_label(Path::new(c), &self.paths.home))
                         }
-                        None => "Claude Code not found, usage updates every 12 min.".to_owned(),
+                        None => "No se encontró Claude Code; el uso se actualiza cada 12 min.".to_owned(),
                     },
                 ))
             });
@@ -741,11 +750,11 @@ impl SettingsView {
             let is_active = active.as_deref() == Some(ds.as_str());
             let (meta, chip) = match (&err, is_active) {
                 // Transient errors retry on their own; the rest need the user.
-                (Some(e), _) if e.retrying => (e.message.clone(), Some(pill(t, "Retrying", Tone::Warn))),
-                (Some(e), _) => (e.message.clone(), Some(pill(t, "Needs attention", Tone::Bad))),
-                (None, true) => (String::new(), Some(pill(t, "On device", Tone::Ok))),
-                (None, false) if self.snap.is_some() => ("Not selected for the device".to_string(), None),
-                (None, false) => ("Start Clawdmeter to check usage.".to_string(), None),
+                (Some(e), _) if e.retrying => (e.message.clone(), Some(pill(t, "Reintentando", Tone::Warn))),
+                (Some(e), _) => (e.message.clone(), Some(pill(t, "Requiere atención", Tone::Bad))),
+                (None, true) => (String::new(), Some(pill(t, "En el dispositivo", Tone::Ok))),
+                (None, false) if self.snap.is_some() => ("No seleccionada para el dispositivo".to_string(), None),
+                (None, false) => ("Abre Clawdmeter para consultar el uso.".to_string(), None),
             };
             let me = cx.entity().downgrade();
             let dir = d.clone();
@@ -773,7 +782,7 @@ impl SettingsView {
                     .child(button(
                         t,
                         SharedString::from(format!("rm-{i}")),
-                        "Remove",
+                        "Quitar",
                         ButtonKind::Small,
                         !only_one,
                         move |_, _, cx| {
@@ -789,10 +798,10 @@ impl SettingsView {
         pane = pane.child(list).child(caption(
             t,
             if only_one {
-                "Removing a folder stops monitoring it; its files and installed hooks stay in place. The last \
-                 folder can't be removed."
+                "Al quitar una carpeta se deja de vigilar; sus archivos y hooks instalados se mantienen. La última \
+                 carpeta no se puede quitar."
             } else {
-                "Removing a folder stops monitoring it; its files and installed hooks stay in place."
+                "Al quitar una carpeta se deja de vigilar; sus archivos y hooks instalados se mantienen."
             },
         ));
         if self.snap.is_none() {
@@ -805,9 +814,9 @@ impl SettingsView {
         let mut pane = div().flex().flex_col().gap(px(14.)).when(!self.embedded, |d| {
             d.child(heading(t, "Hooks")).child(para(
                 t,
-                "Hooks let Clawd react to activity and show alerts. The event log stores timestamps, event types, \
-                 and session IDs. Alerts also store notification or question text for the device. Usage meters work \
-                 without hooks.",
+                "Los hooks permiten que Clawd reaccione a la actividad y muestre alertas. El registro de eventos guarda \
+                 marcas de tiempo, tipos de evento e ID de sesión. Las alertas guardan también el texto de la \
+                 notificación o pregunta para el dispositivo. Los medidores de uso funcionan sin hooks.",
             ))
         });
         let busy = self.preview.is_some();
@@ -818,37 +827,37 @@ impl SettingsView {
         for (i, row) in self.hooks.iter().enumerate() {
             let (meta, chip, action): (String, (&str, Tone), Option<(&str, HookAction)>) = match &row.status {
                 HookStatus::Installed => (
-                    format!("{} hooks installed", HOOKS.len()),
-                    ("Installed", Tone::Ok),
-                    Some(("Review removal", HookAction::Remove)),
+                    format!("{} hooks instalados", HOOKS.len()),
+                    ("Instalados", Tone::Ok),
+                    Some(("Revisar retirada", HookAction::Remove)),
                 ),
                 HookStatus::Missing => (
-                    "Clawdmeter hooks are not installed. Other hooks are kept.".into(),
-                    ("Not installed", Tone::Plain),
-                    Some(("Review install", HookAction::Install)),
+                    "Los hooks de Clawdmeter no están instalados. Los demás hooks se mantienen.".into(),
+                    ("No instalados", Tone::Plain),
+                    Some(("Revisar instalación", HookAction::Install)),
                 ),
                 HookStatus::Legacy => (
-                    "Uses attention-hook.sh. Update to the built-in Clawdmeter hooks.".into(),
-                    ("Legacy hooks", Tone::Warn),
-                    Some(("Review update", HookAction::Install)),
+                    "Usa attention-hook.sh. Actualiza a los hooks integrados de Clawdmeter.".into(),
+                    ("Hooks antiguos", Tone::Warn),
+                    Some(("Revisar actualización", HookAction::Install)),
                 ),
                 HookStatus::Stale(old) => (
                     if let Some(u) = clawdmeter_core::launch::unstable(Path::new(old)) {
-                        format!("Runs {}, {}.", tilde(old, &self.paths.home), u.location())
+                        format!("Ejecuta {}, {}.", tilde(old, &self.paths.home), u.location())
                     } else if Path::new(old).exists() {
-                        format!("Uses another Clawdmeter executable: {}.", tilde(old, &self.paths.home))
+                        format!("Usa otro ejecutable de Clawdmeter: {}.", tilde(old, &self.paths.home))
                     } else {
-                        format!("Runs {}, which no longer exists.", tilde(old, &self.paths.home))
+                        format!("Ejecuta {}, que ya no existe.", tilde(old, &self.paths.home))
                     },
-                    ("Out of date", Tone::Warn),
-                    Some(("Review update", HookAction::Install)),
+                    ("Desactualizados", Tone::Warn),
+                    Some(("Revisar actualización", HookAction::Install)),
                 ),
                 HookStatus::Partial => (
-                    "Some hooks are missing.".into(),
-                    ("Incomplete", Tone::Warn),
-                    Some(("Review update", HookAction::Install)),
+                    "Faltan algunos hooks.".into(),
+                    ("Incompletos", Tone::Warn),
+                    Some(("Revisar actualización", HookAction::Install)),
                 ),
-                HookStatus::Unreadable(e) => (e.clone(), ("Unreadable", Tone::Bad), None),
+                HookStatus::Unreadable(e) => (e.clone(), ("Ilegible", Tone::Bad), None),
             };
             let mut r = div()
                 .flex()
@@ -900,14 +909,14 @@ impl SettingsView {
         if let Some(p) = &self.preview {
             let n = p.plans.len();
             let title = match (p.action, n) {
-                (HookAction::Install, 1) => "Review 1 file".to_string(),
-                (HookAction::Install, n) => format!("Review {n} files"),
-                (HookAction::Remove, _) => "Review hook removal".to_string(),
+                (HookAction::Install, 1) => "Revisar 1 archivo".to_string(),
+                (HookAction::Install, n) => format!("Revisar {n} archivos"),
+                (HookAction::Remove, _) => "Revisar retirada de hooks".to_string(),
             };
             let (me1, me2) = (cx.entity().downgrade(), cx.entity().downgrade());
             let apply = match p.action {
-                HookAction::Install => "Install hooks",
-                HookAction::Remove => "Remove hooks",
+                HookAction::Install => "Instalar hooks",
+                HookAction::Remove => "Quitar hooks",
             };
             pane = pane.child(
                 div()
@@ -922,15 +931,17 @@ impl SettingsView {
                             cx.notify();
                         });
                     }))
-                    .child(button(t, "cancel-hooks", "Cancel", ButtonKind::Normal, true, move |_, _, cx| {
+                    .child(button(t, "cancel-hooks", "Cancelar", ButtonKind::Normal, true, move |_, _, cx| {
                         let _ = me2.update(cx, |v, cx| {
                             v.preview = None;
                             cx.notify();
                         });
                     })),
             );
-            pane =
-                pane.child(caption(t, "Review before applying. Your original settings are kept in settings.json.bak."));
+            pane = pane.child(caption(
+                t,
+                "Revísalo antes de aplicar. Tus ajustes originales se guardan en settings.json.bak.",
+            ));
             for plan in &p.plans {
                 // Diff what changes, not how the file was formatted: compare
                 // against the old file pretty-printed the way it will be saved.
@@ -970,8 +981,8 @@ impl SettingsView {
                 }
                 let file = tilde(&plan.path.display().to_string(), &self.paths.home);
                 let what = match (plan.before.is_none(), reformatted) {
-                    (true, _) => format!("{file} (new file)"),
-                    (false, true) => format!("{file} (also re-indented)"),
+                    (true, _) => format!("{file} (archivo nuevo)"),
+                    (false, true) => format!("{file} (también reindentado)"),
                     (false, false) => file,
                 };
                 pane = pane.child(div().flex().flex_col().gap(px(6.)).child(caption(t, what)).child(block));
@@ -983,10 +994,10 @@ impl SettingsView {
             let me1 = cx.entity().downgrade();
             let n = pending.len();
             let label = match (any_old, n) {
-                (true, 1) => "Review update".to_string(),
-                (true, n) => format!("Review updates for {n} accounts"),
-                (false, 1) => "Review installation".to_string(),
-                (false, n) => format!("Review installation in {n} accounts"),
+                (true, 1) => "Revisar actualización".to_string(),
+                (true, n) => format!("Revisar actualizaciones de {n} cuentas"),
+                (false, 1) => "Revisar instalación".to_string(),
+                (false, n) => format!("Revisar instalación en {n} cuentas"),
             };
             pane = pane.child(div().flex().items_center().gap(px(8.)).when(n > 0, |d| {
                 d.child(button(t, "install-all", label, ButtonKind::Primary, true, move |_, _, cx| {
@@ -1012,17 +1023,26 @@ impl SettingsView {
     fn alert_kinds(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         type Pick = fn(&mut AlertOn) -> &mut bool;
         let rows: [(&'static str, &'static str, &'static str, Pick); 4] = [
-            ("alert-permission", "Tool approvals", "Claude needs permission to run a tool.", |a| &mut a.permission),
-            ("alert-question", "Questions", "Claude has a question for you.", |a| &mut a.question),
-            ("alert-idle", "Idle sessions", "Claude has been waiting for your next prompt.", |a| &mut a.idle),
-            ("alert-elicitation", "MCP requests", "An MCP server needs information from you.", |a| &mut a.elicitation),
+            (
+                "alert-permission",
+                "Aprobación de herramientas",
+                "Claude necesita permiso para usar una herramienta.",
+                |a| &mut a.permission,
+            ),
+            ("alert-question", "Preguntas", "Claude tiene una pregunta para ti.", |a| &mut a.question),
+            ("alert-idle", "Sesiones inactivas", "Claude lleva un rato esperando tu siguiente mensaje.", |a| {
+                &mut a.idle
+            }),
+            ("alert-elicitation", "Peticiones MCP", "Un servidor MCP necesita información tuya.", |a| {
+                &mut a.elicitation
+            }),
         ];
         let mut list = div()
             .flex()
             .flex_col()
             .pt(px(10.))
-            .child(subheading(t, "Alert types"))
-            .child(caption(t, "Applies to all accounts, on the device and in the tray."));
+            .child(subheading(t, "Tipos de alerta"))
+            .child(caption(t, "Se aplica a todas las cuentas, en el dispositivo y en la bandeja."));
         let current = self.settings.alert_on;
         for (id, label, help, pick) in rows {
             let mut probe = current;
@@ -1040,7 +1060,7 @@ impl SettingsView {
         }
         // Try the alert types (and the chimes) from here.
         let me = cx.entity().downgrade();
-        let label = if self.test_alert == Some(Ok(())) { "Sent" } else { "Send test alert" };
+        let label = if self.test_alert == Some(Ok(())) { "Enviada" } else { "Enviar alerta de prueba" };
         list.child(
             div()
                 .flex()
@@ -1063,10 +1083,10 @@ impl SettingsView {
         let me = cx.entity().downgrade();
         let on = self.autostart_on;
         let home = self.paths.home.clone();
-        let mut pane = div().flex().flex_col().gap(px(6.)).child(heading(t, "Settings")).child(field(
+        let mut pane = div().flex().flex_col().gap(px(6.)).child(heading(t, "Ajustes")).child(field(
             t,
-            "Start at login",
-            "Opens Clawdmeter when you sign in.",
+            "Abrir al iniciar sesión",
+            "Abre Clawdmeter cuando inicias sesión.",
             toggle(t, "autostart", on, true, move |_, _, cx| {
                 let home = home.clone();
                 let _ = me.update(cx, |v, cx| {
@@ -1076,7 +1096,7 @@ impl SettingsView {
                         Err(why) => Err(why),
                     };
                     if let Err(why) = r {
-                        v.notice = Some((Tone::Bad, format!("Couldn't change Start at login. {why}")));
+                        v.notice = Some((Tone::Bad, format!("No se pudo cambiar Abrir al iniciar sesión. {why}")));
                     }
                     v.reload();
                     cx.notify();
@@ -1086,25 +1106,25 @@ impl SettingsView {
         if let (Some(old), Some(exe)) = (self.autostart_stale.clone(), self.launch_exe.clone()) {
             let text = match old {
                 Some(o) if clawdmeter_core::launch::unstable(&o).is_some() => format!(
-                    "Start at login opens {}, {}.",
+                    "Abrir al iniciar sesión abre {}, {}.",
                     tilde(&o.display().to_string(), &self.paths.home),
                     clawdmeter_core::launch::unstable(&o).map_or("", |u| u.location())
                 ),
                 Some(o) if !o.exists() => format!(
-                    "Start at login opens {}, which no longer exists.",
+                    "Abrir al iniciar sesión abre {}, que ya no existe.",
                     tilde(&o.display().to_string(), &self.paths.home)
                 ),
                 Some(o) => format!(
-                    "Start at login opens another copy of Clawdmeter: {}.",
+                    "Abrir al iniciar sesión abre otra copia de Clawdmeter: {}.",
                     tilde(&o.display().to_string(), &self.paths.home)
                 ),
-                None => "Start at login can't be read.".into(),
+                None => "No se puede leer Abrir al iniciar sesión.".into(),
             };
             let me = cx.entity().downgrade();
             let home = self.paths.home.clone();
             pane =
                 pane.child(div().pb(px(6.)).child(notice(t, Tone::Warn, text).child(div().flex().pl(px(18.)).child(
-                    button(t, "fix-autostart", "Use this copy", ButtonKind::Small, true, move |_, _, cx| {
+                    button(t, "fix-autostart", "Usar esta copia", ButtonKind::Small, true, move |_, _, cx| {
                         let _ = me.update(cx, |v, cx| {
                             let r = match v.launchable(false) {
                                 Ok(_) => {
@@ -1113,7 +1133,8 @@ impl SettingsView {
                                 Err(why) => Err(why),
                             };
                             if let Err(why) = r {
-                                v.notice = Some((Tone::Bad, format!("Couldn't change Start at login. {why}")));
+                                v.notice =
+                                    Some((Tone::Bad, format!("No se pudo cambiar Abrir al iniciar sesión. {why}")));
                             }
                             v.reload();
                             cx.notify();
@@ -1128,23 +1149,23 @@ impl SettingsView {
             PollChoice::Auto
         };
         let mut options = vec![
-            (PollChoice::Auto, "Automatic"),
-            (PollChoice::Every(120), "While working: 2 min"),
-            (PollChoice::Every(300), "While working: 5 min"),
+            (PollChoice::Auto, "Automático"),
+            (PollChoice::Every(120), "Trabajando: 2 min"),
+            (PollChoice::Every(300), "Trabajando: 5 min"),
         ];
         let custom;
         if let PollChoice::Every(n) = poll {
             if n != 120 && n != 300 {
-                custom = format!("While working: {n} s");
+                custom = format!("Trabajando: {n} s");
                 options.push((poll, custom.as_str()));
             }
         }
         let me = cx.entity().downgrade();
         pane = pane.child(field_stacked(
             t,
-            "Usage checks",
-            "Automatic checks every 3 minutes while working, then less often when quiet. Retry delays apply to \
-             every check.",
+            "Consultas de uso",
+            "En automático, consulta cada 3 minutos mientras trabajas y con menos frecuencia en reposo. Las esperas \
+             entre reintentos se aplican a todas las consultas.",
             segmented(t, "poll", &options, &poll, true, move |c, _, cx| {
                 let _ = me.update(cx, |v, cx| {
                     let paths = v.paths.clone();
@@ -1167,14 +1188,14 @@ impl SettingsView {
         // A missing CLI stops everything, so it isn't tucked under Advanced.
         if self.snap.as_ref().is_some_and(|s| s.claude.is_none()) {
             let cfgp = self.paths.config_file.clone();
-            let label = if cfgp.exists() { "Open config" } else { "Create config" };
+            let label = if cfgp.exists() { "Abrir configuración" } else { "Crear configuración" };
             pane = pane.child(
                 div().pt(px(12.)).child(
                     notice(
                         t,
                         Tone::Plain,
-                        "Claude Code wasn't found, so usage updates every 12 minutes. Install Claude Code or the Claude \
-                         desktop app for updates while you work, or set claude_path in the config file.",
+                        "No se encontró Claude Code, así que el uso se actualiza cada 12 minutos. Instala Claude Code o la app \
+                         de escritorio de Claude para actualizar mientras trabajas, o define claude_path en la configuración.",
                     )
                     .child(div().flex().pl(px(18.)).child(button(
                         t,
@@ -1190,9 +1211,9 @@ impl SettingsView {
         let p = self.paths.clone();
         pane = pane.child(field(
             t,
-            "Quit Clawdmeter",
-            "Stops usage updates and closes Clawdmeter. The device retains its last reading.",
-            button(t, "quit", "Quit", ButtonKind::Small, self.snap.is_some(), move |_, window, _| {
+            "Salir de Clawdmeter",
+            "Detiene las actualizaciones de uso y cierra Clawdmeter. El dispositivo conserva la última lectura.",
+            button(t, "quit", "Salir", ButtonKind::Small, self.snap.is_some(), move |_, window, _| {
                 command(&p, AppCommand::Quit);
                 window.remove_window();
             }),
@@ -1202,12 +1223,12 @@ impl SettingsView {
             let home = self.paths.home.clone();
             pane = pane.child(field(
                 t,
-                "Legacy service detected",
+                "Servicio antiguo detectado",
                 format!(
-                    "Disable {} so only one Clawdmeter process connects to the device.",
+                    "Desactiva {} para que solo un proceso de Clawdmeter se conecte al dispositivo.",
                     tilde(&legacy.describe(), &self.paths.home)
                 ),
-                button(t, "legacy", "Disable legacy service", ButtonKind::Primary, true, move |_, _, cx| {
+                button(t, "legacy", "Desactivar servicio antiguo", ButtonKind::Primary, true, move |_, _, cx| {
                     autostart::disable_legacy(&home);
                     let _ = me.update(cx, |v, cx| {
                         v.reload();
@@ -1215,7 +1236,7 @@ impl SettingsView {
                             v.notice = Some((
                                 Tone::Bad,
                                 format!(
-                                    "Couldn't disable {}. Remove it by hand.",
+                                    "No se pudo desactivar {}. Quítalo a mano.",
                                     tilde(&still.describe(), &v.paths.home)
                                 ),
                             ));
@@ -1250,39 +1271,39 @@ impl SettingsView {
                     icon(if open { "chevron-down" } else { "chevron-right" }, 16., t.dim)
                         .group_hover("advanced", move |s| s.text_color(text)),
                 )
-                .child("Advanced"),
+                .child("Avanzado"),
         );
         if open {
             let mut advanced = div().flex().flex_col();
             let claude = self.snap.as_ref().and_then(|s| s.claude.clone());
             advanced = advanced.child(field(
                 t,
-                "Claude Code executable",
+                "Ejecutable de Claude Code",
                 match &claude {
-                    Some(c) => format!("Usage is read with {}.", crate::claude_label(Path::new(c), &self.paths.home)),
-                    None if self.snap.is_some() => "Not found.".into(),
-                    None => "Start Clawdmeter to detect Claude Code.".into(),
+                    Some(c) => format!("El uso se lee con {}.", crate::claude_label(Path::new(c), &self.paths.home)),
+                    None if self.snap.is_some() => "No encontrado.".into(),
+                    None => "Abre Clawdmeter para detectar Claude Code.".into(),
                 },
                 div(),
             ));
             let log = self.paths.state_dir.join("daemon.log");
             advanced = advanced.child(field(
                 t,
-                "Log file",
+                "Archivo de registro",
                 tilde(&log.display().to_string(), &self.paths.home),
-                button(t, "open-log", "Open log", ButtonKind::Small, log.exists(), move |_, _, cx| {
+                button(t, "open-log", "Abrir registro", ButtonKind::Small, log.exists(), move |_, _, cx| {
                     cx.open_with_system(&log)
                 }),
             ));
             let cfgp = self.paths.config_file.clone();
             advanced = advanced.child(field(
                 t,
-                "Config file",
+                "Archivo de configuración",
                 tilde(&cfgp.display().to_string(), &self.paths.home),
                 button(
                     t,
                     "open-cfg",
-                    if cfgp.exists() { "Open config" } else { "Create config" },
+                    if cfgp.exists() { "Abrir configuración" } else { "Crear configuración" },
                     ButtonKind::Small,
                     true,
                     move |_, _, cx| open_config(&cfgp, cx),
@@ -1296,7 +1317,7 @@ impl SettingsView {
 
 /// What a new config file starts with: the keys people reach for, commented.
 const CONFIG_TEMPLATE: &str = "\
-# Clawdmeter settings: key = value. The app re-reads this file within a few seconds.
+# Ajustes de Clawdmeter: clave = valor. La app vuelve a leer este archivo en unos segundos.
 # claude_path = /path/to/claude
 # config_dirs = ~/.claude, ~/.claude-work
 # heartbeat_interval = 60
@@ -1357,11 +1378,11 @@ pub(crate) fn write_settings(
 /// What Clawd does at a liveliness level, under the slider.
 fn liveliness_info(level: u8) -> &'static str {
     match level {
-        1 => "Still in his corner, a new verb once a minute. Taps and alerts still get a reaction.",
-        2 => "Mostly still: fewer corner acts, and shows only after long busy stretches.",
-        3 => "Corner acts now and then, a show after a busy stretch, a screensaver while you're away.",
-        4 => "Livelier: more corner acts, and shows come sooner and more often.",
-        _ => "Frequent shows and reactions. Even a moderately busy stretch earns a show.",
+        1 => "Quieto en su rincón, un verbo nuevo cada minuto. Sigue reaccionando a toques y alertas.",
+        2 => "Casi quieto: menos numeritos en el rincón y espectáculos solo tras rachas largas de trabajo.",
+        3 => "Numeritos de vez en cuando, un espectáculo tras una racha de trabajo y salvapantallas si no estás.",
+        4 => "Más animado: más numeritos, y los espectáculos llegan antes y más a menudo.",
+        _ => "Espectáculos y reacciones frecuentes. Hasta una racha moderada se gana un espectáculo.",
     }
 }
 
@@ -1370,7 +1391,7 @@ fn attention_anim_label(a: AttentionAnim) -> &'static str {
         AttentionAnim::Min2 => "2m",
         AttentionAnim::S30 => "30s",
         AttentionAnim::S10 => "10s",
-        AttentionAnim::Off => "Off",
+        AttentionAnim::Off => "No",
     }
 }
 
@@ -1482,7 +1503,7 @@ mod tests {
         assert!(paths.attention_file().exists());
         // No app-status.json: the app isn't running to pick it up.
         view.read_with(cx, |v, _| {
-            assert_eq!(v.test_alert, Some(Err("Clawdmeter isn't running.".into())));
+            assert_eq!(v.test_alert, Some(Err("Clawdmeter no se está ejecutando.".into())));
             assert!(v.hook_msg.is_none(), "no banner");
         });
         cx.executor().advance_clock(TEST_ALERT_FAILED);

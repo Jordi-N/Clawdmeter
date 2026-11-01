@@ -300,7 +300,7 @@ pub fn chrome(t: &Theme, window: &Window, body: impl IntoElement) -> impl IntoEl
                             .cursor_pointer()
                             .hover(|s| s.bg(wash(0.15)))
                             .active(|s| s.bg(wash(0.3)))
-                            .tooltip(widgets::tooltip("Close window"))
+                            .tooltip(widgets::tooltip("Cerrar ventana"))
                             .child(widgets::icon("x", 16., t.text))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(|_, window, _| window.remove_window()),
@@ -360,7 +360,7 @@ pub fn command(paths: &Paths, cmd: AppCommand) {
 
 /// Text for "the daemon isn't running" banners.
 pub fn not_running_text() -> SharedString {
-    "Start Clawdmeter from your app menu, or run clawdmeter in a terminal.".into()
+    "Abre Clawdmeter desde el menú de aplicaciones o ejecuta clawdmeter en una terminal.".into()
 }
 
 /// Run blocking work off the UI thread, then hand the result to the view.

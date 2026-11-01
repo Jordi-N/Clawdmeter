@@ -223,8 +223,9 @@ impl AppView {
             .pt(px(12.))
             .text_size(px(12.))
             .text_color(t.mute)
+            .child(div().text_color(t.accent).child("Grimua edition"))
             .child(
-                div().flex().gap(px(4.)).whitespace_nowrap().child("Created by").child(
+                div().flex().gap(px(4.)).whitespace_nowrap().child("Creado por").child(
                     div()
                         .id("credit")
                         .debug_selector(|| "credit".into())
@@ -235,7 +236,7 @@ impl AppView {
                         .child("@HermannBjorgvin"),
                 ),
             )
-            .child(format!("Version {}", crate::version()));
+            .child(format!("Versión {}", crate::version()));
         div()
             .flex()
             .flex_col()

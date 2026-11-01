@@ -574,7 +574,7 @@ pub fn kv(t: &Theme, rows: Vec<(&'static str, SharedString)>) -> impl IntoElemen
             div()
                 .flex()
                 .gap(px(12.))
-                .child(div().w(px(76.)).flex_shrink_0().text_size(px(13.)).text_color(t.mute).child(k))
+                .child(div().w(px(92.)).flex_shrink_0().text_size(px(13.)).text_color(t.mute).child(k))
                 .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).text_color(t.text).child(v)),
         );
     }

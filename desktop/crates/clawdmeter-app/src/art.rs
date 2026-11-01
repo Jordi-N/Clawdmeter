@@ -60,11 +60,11 @@ impl TrayState {
     /// Short label for the status line.
     pub fn label(self) -> &'static str {
         match self {
-            TrayState::Connected => "Connected",
-            TrayState::Stale => "Usage out of date",
-            TrayState::Searching => "Looking for device",
-            TrayState::AuthError => "Signed out",
-            TrayState::Attention => "Claude needs you",
+            TrayState::Connected => "Conectado",
+            TrayState::Stale => "Uso desactualizado",
+            TrayState::Searching => "Buscando dispositivo",
+            TrayState::AuthError => "Sesión cerrada",
+            TrayState::Attention => "Claude te necesita",
         }
     }
 }

@@ -189,9 +189,12 @@ impl std::fmt::Display for HookError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HookError::Parse(_) => {
-                write!(f, "settings.json contains invalid JSON. Fix the file, then retry. Nothing was written.")
+                write!(
+                    f,
+                    "settings.json contiene JSON no válido. Corrige el archivo y reinténtalo. No se ha escrito nada."
+                )
             }
-            HookError::Shape(w) => write!(f, "Unsupported settings.json layout: {w}. Nothing was written."),
+            HookError::Shape(w) => write!(f, "Estructura de settings.json no compatible: {w}. No se ha escrito nada."),
             HookError::Io(e) => write!(f, "{}", crate::errors::io_message(e)),
         }
     }
@@ -210,7 +213,7 @@ fn parse_root(text: Option<&str>) -> Result<Map<String, Value>, HookError> {
         None | Some("") => Ok(Map::new()),
         Some(t) => match serde_json::from_str::<Value>(t).map_err(|e| HookError::Parse(e.to_string()))? {
             Value::Object(m) => Ok(m),
-            _ => Err(HookError::Shape("the top level isn't an object")),
+            _ => Err(HookError::Shape("el nivel superior no es un objeto")),
         },
     }
 }
@@ -227,11 +230,11 @@ fn render(root: Map<String, Value>) -> String {
 pub fn merge(text: Option<&str>, exe: &Path) -> Result<String, HookError> {
     let mut root = parse_root(text)?;
     let hooks = root.entry("hooks").or_insert_with(|| Value::Object(Map::new()));
-    let hooks = hooks.as_object_mut().ok_or(HookError::Shape("\"hooks\" isn't an object"))?;
+    let hooks = hooks.as_object_mut().ok_or(HookError::Shape("\"hooks\" no es un objeto"))?;
     for spec in HOOKS {
         let cmd = hook_command(exe, spec.args);
         let list = hooks.entry(spec.event).or_insert_with(|| Value::Array(Vec::new()));
-        let list = list.as_array_mut().ok_or(HookError::Shape("a hook event isn't a list"))?;
+        let list = list.as_array_mut().ok_or(HookError::Shape("un evento de hook no es una lista"))?;
         let mut placed = false;
         // Groups that belong to another spec on the same event.
         let sibling = |g: &Value| {

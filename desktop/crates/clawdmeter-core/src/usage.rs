@@ -220,36 +220,40 @@ impl UsageError {
         let again = match retry_in.filter(|s| *s > 0) {
             Some(s) => {
                 let m = (s + 59) / 60;
-                format!("Trying again in about {m} minute{}.", if m == 1 { "" } else { "s" })
+                if m == 1 {
+                    "Se reintentará en un minuto.".to_owned()
+                } else {
+                    format!("Se reintentará en unos {m} minutos.")
+                }
             }
-            None => "Retrying.".to_owned(),
+            None => "Reintentando.".to_owned(),
         };
         match self {
             UsageError::Spawn(_) => {
-                "Couldn't run Claude Code. Check its installation and the claude_path setting.".into()
+                "No se pudo ejecutar Claude Code. Revisa su instalación y el ajuste claude_path.".into()
             }
-            UsageError::Timeout => format!("Claude Code took too long to answer. {again}"),
-            UsageError::BadOutput(_) => format!("Couldn't read Claude Code's usage response. {again}"),
-            UsageError::NotLoggedIn(_) => "Sign in to Claude Code for this account folder.".into(),
-            UsageError::NotSubscription => "This account doesn't report subscription usage limits.".into(),
-            UsageError::NoUsageLines(_) => format!("No usage data was returned. {again}"),
+            UsageError::Timeout => format!("Claude Code tardó demasiado en responder. {again}"),
+            UsageError::BadOutput(_) => format!("No se pudo leer la respuesta de uso de Claude Code. {again}"),
+            UsageError::NotLoggedIn(_) => "Inicia sesión en Claude Code para esta carpeta de cuenta.".into(),
+            UsageError::NotSubscription => "Esta cuenta no informa de límites de uso de suscripción.".into(),
+            UsageError::NoUsageLines(_) => format!("No se recibieron datos de uso. {again}"),
             UsageError::RateLimited { .. } | UsageError::Throttled { .. } => {
-                format!("Usage requests are temporarily limited. {again}")
+                format!("Las consultas de uso están limitadas temporalmente. {again}")
             }
             UsageError::TokenExpired | UsageError::TokenRejected => {
-                "Waiting for Claude Code to renew its sign-in. Using Claude Code or the Claude desktop app renews it."
+                "Esperando a que Claude Code renueve la sesión. Se renueva al usar Claude Code o la app de escritorio de Claude."
                     .into()
             }
-            UsageError::Offline(_) => format!("Couldn't reach Claude. {again}"),
+            UsageError::Offline(_) => format!("No se pudo conectar con Claude. {again}"),
         }
     }
 }
 
-/// "Usage paused by Anthropic until 14:05." for a block ending at `until`
+/// "Uso pausado por Anthropic hasta las 14:05." for a block ending at `until`
 /// (unix seconds), shown at `utc_offset` (seconds east of UTC).
 pub fn paused_message(until: i64, utc_offset: i64) -> String {
     let t = DateTime::<Utc>::from_timestamp(until + utc_offset, 0).unwrap_or_default();
-    format!("Usage paused by Anthropic until {}.", t.format("%H:%M"))
+    format!("Uso pausado por Anthropic hasta las {}.", t.format("%H:%M"))
 }
 
 fn snippet(s: &str) -> String {
@@ -1122,22 +1126,22 @@ mod tests {
     #[test]
     fn paused_until_clock_time() {
         // 2026-10-14T01:19:13Z + 3600 s, shown in UTC and at UTC+2.
-        assert_eq!(paused_message(1_791_940_753 + 3600, 0), "Usage paused by Anthropic until 02:19.");
-        assert_eq!(paused_message(1_791_940_753 + 3600, 7200), "Usage paused by Anthropic until 04:19.");
+        assert_eq!(paused_message(1_791_940_753 + 3600, 0), "Uso pausado por Anthropic hasta las 02:19.");
+        assert_eq!(paused_message(1_791_940_753 + 3600, 7200), "Uso pausado por Anthropic hasta las 04:19.");
     }
 
     #[test]
     fn user_messages_name_the_wait() {
         let rl = UsageError::NoUsageLines("".into());
-        assert_eq!(rl.user_message(Some(590)), "No usage data was returned. Trying again in about 10 minutes.");
+        assert_eq!(rl.user_message(Some(590)), "No se recibieron datos de uso. Se reintentará en unos 10 minutos.");
         assert_eq!(
             UsageError::RateLimited { retry_after_secs: 30 }.user_message(Some(45)),
-            "Usage requests are temporarily limited. Trying again in about 1 minute."
+            "Las consultas de uso están limitadas temporalmente. Se reintentará en un minuto."
         );
-        assert_eq!(rl.user_message(None), "No usage data was returned. Retrying.");
+        assert_eq!(rl.user_message(None), "No se recibieron datos de uso. Reintentando.");
         assert_eq!(
             UsageError::Timeout.user_message(Some(1200)),
-            "Claude Code took too long to answer. Trying again in about 20 minutes."
+            "Claude Code tardó demasiado en responder. Se reintentará en unos 20 minutos."
         );
         assert!(UsageError::Timeout.is_transient() && !UsageError::Spawn("x".into()).is_transient());
         assert!(!UsageError::NotSubscription.is_transient());

@@ -73,18 +73,18 @@ impl Unstable {
     /// Where the path is, for "Runs <path>, <where>."
     pub fn location(self) -> &'static str {
         match self {
-            Unstable::DiskImage => "which is on a disk image",
-            Unstable::Translocated => "a temporary copy macOS made",
-            Unstable::Temporary => "which is in a temporary folder",
+            Unstable::DiskImage => "que está en una imagen de disco",
+            Unstable::Translocated => "una copia temporal creada por macOS",
+            Unstable::Temporary => "que está en una carpeta temporal",
         }
     }
 
     /// Where it runs from, for "Clawdmeter is running from <noun>."
     pub fn location_noun(self) -> &'static str {
         match self {
-            Unstable::DiskImage => "its disk image",
-            Unstable::Translocated => "a temporary copy macOS made",
-            Unstable::Temporary => "a temporary folder",
+            Unstable::DiskImage => "su imagen de disco",
+            Unstable::Translocated => "una copia temporal creada por macOS",
+            Unstable::Temporary => "una carpeta temporal",
         }
     }
 
@@ -92,9 +92,9 @@ impl Unstable {
     pub fn advice(self) -> &'static str {
         match self {
             Unstable::DiskImage | Unstable::Translocated => {
-                "Move Clawdmeter to Applications first, then open it from there."
+                "Mueve primero Clawdmeter a Aplicaciones y ábrelo desde ahí."
             }
-            Unstable::Temporary => "Extract Clawdmeter from the zip first, then run it from there.",
+            Unstable::Temporary => "Extrae primero Clawdmeter del zip y ejecútalo desde ahí.",
         }
     }
 }

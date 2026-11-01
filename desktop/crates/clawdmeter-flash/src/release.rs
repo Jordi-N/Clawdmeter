@@ -83,24 +83,27 @@ impl ReleaseError {
 impl std::fmt::Display for ReleaseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ReleaseError::NoRelease => write!(f, "No firmware release was found."),
+            ReleaseError::NoRelease => write!(f, "No se encontró ninguna versión de firmware."),
             ReleaseError::Offline(_) => {
-                write!(f, "Couldn't reach GitHub. Check your internet connection and try again.")
+                write!(f, "No se pudo conectar con GitHub. Revisa tu conexión a internet y vuelve a intentarlo.")
             }
             ReleaseError::RateLimited => {
-                write!(f, "GitHub is limiting requests from this network. Try again later.")
+                write!(f, "GitHub está limitando las peticiones desde esta red. Inténtalo más tarde.")
             }
-            ReleaseError::Http(_) => write!(f, "Couldn't read the release response from GitHub. Try again later."),
+            ReleaseError::Http(_) => write!(f, "No se pudo leer la respuesta de GitHub. Inténtalo más tarde."),
             ReleaseError::Manifest(_) => {
-                write!(f, "Couldn't read this release's manifest.json. Check that the app supports this release.")
+                write!(
+                    f,
+                    "No se pudo leer el manifest.json de esta versión. Comprueba que la app es compatible con ella."
+                )
             }
-            ReleaseError::MissingAsset(n) => write!(f, "This release is missing {n}."),
+            ReleaseError::MissingAsset(n) => write!(f, "A esta versión le falta {n}."),
             ReleaseError::HashMismatch { file, .. } => {
-                write!(f, "Checksum mismatch for {file}. Download it again before flashing.")
+                write!(f, "La suma de verificación de {file} no coincide. Descárgalo de nuevo antes de grabar.")
             }
             ReleaseError::Io(e) => match e.kind() {
-                io::ErrorKind::PermissionDenied => write!(f, "No permission to read or write that file."),
-                io::ErrorKind::NotFound => write!(f, "File not found."),
+                io::ErrorKind::PermissionDenied => write!(f, "Sin permiso para leer o escribir ese archivo."),
+                io::ErrorKind::NotFound => write!(f, "Archivo no encontrado."),
                 _ => write!(f, "{e}"),
             },
         }
@@ -409,7 +412,7 @@ mod tests {
         let latest = latest_url("o/r");
         assert_eq!(
             ReleaseError::from_ureq(&latest, ureq::Error::StatusCode(404)).to_string(),
-            "No firmware release was found."
+            "No se encontró ninguna versión de firmware."
         );
         assert!(matches!(
             ReleaseError::from_ureq("https://x/a.bin", ureq::Error::StatusCode(404)),
@@ -421,7 +424,7 @@ mod tests {
         assert!(!off.to_string().contains("http"), "no URL dumps in the message");
         assert!(off.detail().unwrap().contains(&latest), "but the log keeps it");
         let bad = ReleaseError::HashMismatch { file: "a.bin".into(), expected: "aa".into(), actual: "bb".into() };
-        assert!(bad.to_string().starts_with("Checksum mismatch for a.bin."));
+        assert!(bad.to_string().starts_with("La suma de verificación de a.bin no coincide."));
     }
 
     #[test]

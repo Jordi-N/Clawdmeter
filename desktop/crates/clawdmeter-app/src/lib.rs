@@ -95,13 +95,13 @@ impl Page {
     /// The sidebar label.
     pub fn label(self) -> &'static str {
         match self {
-            Page::Overview => "Overview",
-            Page::Device => "Device",
-            Page::Flash => "Flash",
-            Page::Accounts => "Accounts",
+            Page::Overview => "Resumen",
+            Page::Device => "Dispositivo",
+            Page::Flash => "Grabar",
+            Page::Accounts => "Cuentas",
             Page::Hooks => "Hooks",
-            Page::Settings => "Settings",
-            Page::Setup => "Setup",
+            Page::Settings => "Ajustes",
+            Page::Setup => "Configuración",
         }
     }
 }
@@ -124,19 +124,19 @@ pub fn claude_label(claude: &std::path::Path, home: &std::path::Path) -> String 
         let version = desktop_claude_root(home)
             .and_then(|r| claude.strip_prefix(r).ok().and_then(|rest| rest.iter().next()).map(|v| v.to_owned()));
         return match version {
-            Some(v) => format!("the Claude desktop app's Claude Code {}", v.to_string_lossy()),
-            None => "the Claude desktop app's Claude Code".into(),
+            Some(v) => format!("el Claude Code de la app de escritorio de Claude {}", v.to_string_lossy()),
+            None => "el Claude Code de la app de escritorio de Claude".into(),
         };
     }
     tilde(&claude.display().to_string(), home)
 }
 
-/// "12 s ago" / "3 min ago" / "2 h ago".
+/// "hace 12 s" / "hace 3 min" / "hace 2 h".
 pub fn ago(secs: i64) -> String {
     match secs.max(0) {
-        s if s < 60 => format!("{s} s ago"),
-        s if s < 3600 => format!("{} min ago", s / 60),
-        s => format!("{} h ago", s / 3600),
+        s if s < 60 => format!("hace {s} s"),
+        s if s < 3600 => format!("hace {} min", s / 60),
+        s => format!("hace {} h", s / 3600),
     }
 }
 
@@ -151,7 +151,7 @@ mod tests {
         if let Some(root) = clawdmeter_core::usage::desktop_claude_root(home) {
             assert_eq!(
                 claude_label(&root.join("2.1.295").join("71164c85f9d2").join("claude"), home),
-                "the Claude desktop app's Claude Code 2.1.295"
+                "el Claude Code de la app de escritorio de Claude 2.1.295"
             );
         }
     }
@@ -162,9 +162,9 @@ mod tests {
         assert_eq!(tilde("/home/u/.claude", home), "~/.claude");
         assert_eq!(tilde("/home/u", home), "~");
         assert_eq!(tilde("/home/uu/.claude", home), "/home/uu/.claude");
-        assert_eq!(ago(12), "12 s ago");
-        assert_eq!(ago(200), "3 min ago");
-        assert_eq!(ago(7300), "2 h ago");
+        assert_eq!(ago(12), "hace 12 s");
+        assert_eq!(ago(200), "hace 3 min");
+        assert_eq!(ago(7300), "hace 2 h");
         for p in Page::SIDEBAR.into_iter().chain([Page::Setup]) {
             assert_eq!(Page::parse(p.as_str()), Some(p));
         }

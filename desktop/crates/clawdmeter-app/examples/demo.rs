@@ -121,7 +121,8 @@ fn fake_status(paths: &Paths, retrying: bool, refresh: Option<String>, idle: boo
         let errors = if retrying {
             vec![ipc::AccountError {
                 dir: work.display().to_string(),
-                message: "Usage requests are temporarily limited. Trying again in about 10 minutes.".into(),
+                message: "Las consultas de uso están limitadas temporalmente. Se reintentará en unos 10 minutos."
+                    .into(),
                 retrying: true,
             }]
         } else {

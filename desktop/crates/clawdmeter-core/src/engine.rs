@@ -1068,7 +1068,7 @@ mod tests {
             st.errors,
             vec![AccountError {
                 dir: a.clone(),
-                message: "No usage data was returned. Trying again in about 10 minutes.".into(),
+                message: "No se recibieron datos de uso. Se reintentará en unos 10 minutos.".into(),
                 retrying: true,
             }]
         );
@@ -1084,7 +1084,7 @@ mod tests {
         assert_eq!(e.status(T0 + 700).refresh_at, Some(T0 + 800), "a refresh waits for the backoff too");
         // Second miss: 20 minutes.
         assert_eq!(poll(&mut e, T0 + 800, |_| Err(UsageError::RateLimited { retry_after_secs: 400 })), vec![a.clone()]);
-        assert!(e.status(T0 + 800).errors[0].message.starts_with("Usage paused by Anthropic until "));
+        assert!(e.status(T0 + 800).errors[0].message.starts_with("Uso pausado por Anthropic hasta las "));
         assert_eq!(poll(&mut e, T0 + 1120, |_| Ok(usage_reading(10))), vec![b.clone()], "B every 12 minutes");
         assert!(e.begin_poll(T0 + 1999).is_none_or(|p| !p.accounts.contains(&a)));
         // Back: errors clear, and the device gets a poll write.
@@ -1123,7 +1123,7 @@ mod tests {
         assert!(fresh.begin_poll(T0 + 100).is_none(), "start-up waits for the block");
         fresh.request_refresh(T0 + 200);
         assert!(fresh.begin_poll(T0 + 200).is_none(), "so does Refresh now");
-        assert!(fresh.status(T0 + 200).errors[0].message.starts_with("Usage paused by Anthropic until "));
+        assert!(fresh.status(T0 + 200).errors[0].message.starts_with("Uso pausado por Anthropic hasta las "));
         assert_eq!(fresh.status(T0 + 200).paused_until, Some(T0 + 3600));
         assert_eq!(fresh.begin_poll(T0 + 3600).map(|p| p.plans), Some(vec![ProbePlan::Usage]));
         // Expired blocks aren't restored.
@@ -1195,7 +1195,7 @@ mod tests {
         assert_eq!(blocks.keys().collect::<Vec<_>>(), vec![&a]);
         let errors = e.status(T0 + 1).errors;
         let msg = |d: &PathBuf| errors.iter().find(|x| &x.dir == d).unwrap().message.clone();
-        assert!(msg(&a).starts_with("Usage paused by Anthropic until "));
+        assert!(msg(&a).starts_with("Uso pausado por Anthropic hasta las "));
         assert!(!msg(&b).contains("paused"), "{}", msg(&b));
     }
 

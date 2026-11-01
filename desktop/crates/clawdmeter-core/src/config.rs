@@ -21,7 +21,7 @@ pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 60;
 /// Smallest accepted poll / heartbeat interval.
 pub const MIN_INTERVAL: u64 = 10;
 /// GitHub repo the flasher reads releases from.
-pub const DEFAULT_RELEASE_REPO: &str = "HermannBjorgvin/Clawdmeter";
+pub const DEFAULT_RELEASE_REPO: &str = "Jordi-N/Clawdmeter";
 /// How lively Clawd is on the device, 1 (No-nonsense) to 5 (All-nonsense).
 pub const LIVELINESS_MIN: u8 = 1;
 /// See [`LIVELINESS_MIN`].

@@ -72,34 +72,36 @@ impl std::fmt::Display for DeviceError {
         match self {
             DeviceError::PermissionDenied { port } if cfg!(target_os = "linux") => write!(
                 f,
-                "No permission to open {port}. Add yourself to the dialout group (uucp on Arch): \
-                 sudo usermod -aG dialout $USER, then log out and back in."
+                "Sin permiso para abrir {port}. Añádete al grupo dialout (uucp en Arch): \
+                 sudo usermod -aG dialout $USER, y cierra y vuelve a abrir la sesión."
             ),
-            DeviceError::PermissionDenied { port } => write!(f, "Permission denied for {port}."),
+            DeviceError::PermissionDenied { port } => write!(f, "Permiso denegado para {port}."),
             DeviceError::Busy { port } => {
-                write!(f, "{port} is in use. Close the serial monitor or other app using it, then retry.")
+                write!(f, "{port} está en uso. Cierra el monitor serie u otra app que lo use y vuelve a intentarlo.")
             }
-            DeviceError::Disconnected => write!(f, "The board disconnected. Reconnect USB and retry."),
+            DeviceError::Disconnected => write!(f, "La placa se desconectó. Vuelve a conectar el USB y reinténtalo."),
             DeviceError::NoBootloader(_) => {
-                write!(f, "The board didn't respond. Unplug it, hold BOOT while you plug it back in, then try again.")
+                write!(f, "La placa no responde. Desconéctala, mantén pulsado BOOT mientras la vuelves a conectar y reinténtalo.")
             }
             DeviceError::WrongChip { found, expected } => write!(
                 f,
-                "This board has an {}, but that firmware is for an {}. Go back and pick your board again.",
+                "Esta placa tiene un {}, pero ese firmware es para un {}. Vuelve atrás y elige de nuevo tu placa.",
                 pretty_chip(found),
                 pretty_chip(expected)
             ),
-            DeviceError::Serial(e) => write!(f, "Couldn't talk to the board ({e})."),
-            DeviceError::Flash(e) => write!(f, "Flashing stopped ({e}). Unplug the board, plug it back in and retry."),
-            DeviceError::NotUsb(p) => write!(f, "{p} isn't a USB serial port."),
+            DeviceError::Serial(e) => write!(f, "No se pudo comunicar con la placa ({e})."),
+            DeviceError::Flash(e) => {
+                write!(f, "La grabación se detuvo ({e}). Desconecta la placa, vuelve a conectarla y reinténtalo.")
+            }
+            DeviceError::NotUsb(p) => write!(f, "{p} no es un puerto serie USB."),
             DeviceError::NotConfirmed { found: None, .. } => write!(
                 f,
-                "The firmware was written, but the board didn't answer after restarting. Unplug it and plug it \
-                 back in; if it still doesn't come up, flash it again."
+                "El firmware se escribió, pero la placa no respondió tras reiniciarse. Desconéctala y vuelve a \
+                 conectarla; si sigue sin arrancar, grábala de nuevo."
             ),
             DeviceError::NotConfirmed { expected, found: Some(info) } => write!(
                 f,
-                "The board restarted, but it reports {} firmware instead of {expected}. Flash it again.",
+                "La placa se reinició, pero informa del firmware {} en lugar de {expected}. Grábala de nuevo.",
                 info.env
             ),
         }
@@ -698,7 +700,7 @@ mod tests {
     #[test]
     fn unconfirmed_flash_copy() {
         let e = DeviceError::NotConfirmed { expected: "waveshare_amoled_216".into(), found: None };
-        assert!(e.to_string().starts_with("The firmware was written, but the board didn't answer"));
+        assert!(e.to_string().starts_with("El firmware se escribió, pero la placa no respondió"));
         let info = FirmwareInfo {
             env: "waveshare_amoled_18".into(),
             ver: "1.0".into(),
@@ -706,7 +708,7 @@ mod tests {
             link: String::new(),
         };
         let e = DeviceError::NotConfirmed { expected: "waveshare_amoled_216".into(), found: Some(info) };
-        assert!(e.to_string().contains("waveshare_amoled_18 firmware instead of waveshare_amoled_216"));
+        assert!(e.to_string().contains("firmware waveshare_amoled_18 en lugar de waveshare_amoled_216"));
     }
 
     #[test]
@@ -778,10 +780,10 @@ mod tests {
         let e = DeviceError::WrongChip { found: "esp32c6".into(), expected: "esp32s3".into() };
         assert_eq!(
             e.to_string(),
-            "This board has an ESP32-C6, but that firmware is for an ESP32-S3. Go back and pick your board again."
+            "Esta placa tiene un ESP32-C6, pero ese firmware es para un ESP32-S3. Vuelve atrás y elige de nuevo tu placa."
         );
         let p = DeviceError::PermissionDenied { port: "/dev/ttyACM0".into() }.to_string();
-        assert!(p.starts_with("No permission to open /dev/ttyACM0."));
+        assert!(p.starts_with("Sin permiso para abrir /dev/ttyACM0."));
         #[cfg(target_os = "linux")]
         assert!(p.contains("dialout"));
     }

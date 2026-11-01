@@ -137,12 +137,12 @@ pub fn state_tone(state: TrayState) -> Tone {
 /// One headline for the link and data state.
 pub fn state_title(s: &StatusSnapshot) -> &'static str {
     match (s.link.as_str(), s.tray_state()) {
-        ("no_adapter", _) => "Bluetooth unavailable",
-        (_, TrayState::Connected) => "Connected",
-        (_, TrayState::Stale) => "Usage out of date",
-        (_, TrayState::Searching) => "Looking for Clawdmeter",
-        (_, TrayState::AuthError) => "Signed out of Claude Code",
-        (_, TrayState::Attention) => "Claude needs you",
+        ("no_adapter", _) => "Bluetooth no disponible",
+        (_, TrayState::Connected) => "Conectado",
+        (_, TrayState::Stale) => "Uso desactualizado",
+        (_, TrayState::Searching) => "Buscando Clawdmeter",
+        (_, TrayState::AuthError) => "Sesión de Claude Code cerrada",
+        (_, TrayState::Attention) => "Claude te necesita",
     }
 }
 
@@ -150,9 +150,9 @@ pub fn state_title(s: &StatusSnapshot) -> &'static str {
 pub fn reset_text(resets_at: Option<i64>, now: i64, none: &str) -> String {
     let Some(t) = resets_at else { return none.to_owned() };
     match (t - now).max(0) / 60 {
-        m if m < 60 => format!("Resets in {m}m"),
-        m if m < 1440 => format!("Resets in {}h {}m", m / 60, m % 60),
-        m => format!("Resets in {}d {}h", m / 1440, (m % 1440) / 60),
+        m if m < 60 => format!("Reinicio {m}m"),
+        m if m < 1440 => format!("Reinicio {}h {}m", m / 60, m % 60),
+        m => format!("Reinicio {}d {}h", m / 1440, (m % 1440) / 60),
     }
 }
 
@@ -216,13 +216,13 @@ impl Render for OverviewView {
         let now = clawdmeter_core::unix_now();
         let home = self.paths.home.clone();
         let (tone, title, sub) = match &self.snap {
-            None => (Tone::Plain, "Not running", not_running_text().to_string()),
+            None => (Tone::Plain, "No se está ejecutando", not_running_text().to_string()),
             Some(s) => {
                 let sub = match (&s.account, s.age(now)) {
-                    _ if s.logged_out => "Open Claude Code in a terminal and sign in.".into(),
-                    (Some(a), Some(age)) => format!("{} · updated {}", tilde(a, &home), ago(age)),
+                    _ if s.logged_out => "Abre Claude Code en una terminal e inicia sesión.".into(),
+                    (Some(a), Some(age)) => format!("{} · actualizado {}", tilde(a, &home), ago(age)),
                     (Some(a), None) => tilde(a, &home),
-                    (None, _) => "No usage data yet".into(),
+                    (None, _) => "Aún no hay datos de uso".into(),
                 };
                 (state_tone(s.tray_state()), state_title(s), sub)
             }
@@ -262,13 +262,13 @@ impl Render for OverviewView {
                 .cursor_pointer()
                 .hover(move |s| s.text_color(text))
                 .on_click(cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Setup))))
-                .child("Run setup guide again"),
+                .child("Repetir la guía de configuración"),
         );
         let on = self.desktop_chime;
         let chime = field(
             &t,
-            "Play a chime on this computer when Claude needs you",
-            "Follows the alert types on the Hooks page. Mute from the tray until restart.",
+            "Sonar un aviso en este ordenador cuando Claude te necesite",
+            "Sigue los tipos de alerta de la página Hooks. Silénciala desde la bandeja hasta reiniciar.",
             toggle(
                 &t,
                 "desktop-chime",
@@ -293,22 +293,21 @@ impl Render for OverviewView {
                 .flex()
                 .flex_col()
                 .gap(px(12.))
-                .child(meter(&t, "Session", s.session_pct, reset_text(s.session_resets_at, now, "Not started")))
-                .child(meter(&t, "Weekly", s.week_pct, reset_text(s.week_resets_at, now, "---"))),
+                .child(meter(&t, "Sesión", s.session_pct, reset_text(s.session_resets_at, now, "Sin empezar")))
+                .child(meter(&t, "Semana", s.week_pct, reset_text(s.week_resets_at, now, "---"))),
         );
         if let Some(v) = s.update_available() {
             let v = v.trim_start_matches('v').to_owned();
             page = page.child(
-                notice(&t, Tone::Accent, format!("Firmware v{v} is available. Connect USB to update.")).child(
-                    div().flex().pl(px(18.)).child(button(
+                notice(&t, Tone::Accent, format!("Hay firmware v{v} disponible. Conecta el USB para actualizar."))
+                    .child(div().flex().pl(px(18.)).child(button(
                         &t,
                         "go-update",
-                        "Update firmware",
+                        "Actualizar firmware",
                         ButtonKind::Primary,
                         true,
                         cx.listener(|_, _, _, cx| cx.emit(Navigate(Page::Flash))),
-                    )),
-                ),
+                    ))),
             );
         }
         page.child(chime).child(setup)
@@ -321,8 +320,8 @@ impl OverviewView {
     fn refresh_control(&self, t: &Theme, s: &StatusSnapshot, now: i64, cx: &mut Context<Self>) -> impl IntoElement {
         let state = refresh_state(s, self.refreshing.is_some(), now);
         let note: Option<SharedString> = match &state {
-            RefreshState::Checking => Some("Checking…".into()),
-            RefreshState::Wait(secs) => Some(format!("Can check again in {}", wait_text(*secs)).into()),
+            RefreshState::Checking => Some("Comprobando…".into()),
+            RefreshState::Wait(secs) => Some(format!("Nueva consulta en {}", wait_text(*secs)).into()),
             RefreshState::Paused(until) => Some(
                 clawdmeter_core::usage::paused_message(*until, clawdmeter_core::platform::utc_offset_secs())
                     .trim_end_matches('.')
@@ -333,7 +332,7 @@ impl OverviewView {
         };
         let checking = state == RefreshState::Checking;
         let button =
-            icon_button(t, "refresh", "refresh-cw", "Refresh usage", state == RefreshState::Ready, checking, {
+            icon_button(t, "refresh", "refresh-cw", "Actualizar uso", state == RefreshState::Ready, checking, {
                 cx.listener(|v, _, _, cx| {
                     command(&v.paths, AppCommand::Refresh);
                     v.refreshing = Some(clawdmeter_core::unix_now());
@@ -370,10 +369,10 @@ mod tests {
 
     #[test]
     fn reset_lines_match_the_device() {
-        assert_eq!(reset_text(None, 0, "Not started"), "Not started");
-        assert_eq!(reset_text(Some(59 * 60 + 30), 0, "---"), "Resets in 59m");
-        assert_eq!(reset_text(Some(177 * 60), 0, "---"), "Resets in 2h 57m");
-        assert_eq!(reset_text(Some(5 * 1440 * 60 + 11 * 3600), 0, "---"), "Resets in 5d 11h");
+        assert_eq!(reset_text(None, 0, "Sin empezar"), "Sin empezar");
+        assert_eq!(reset_text(Some(59 * 60 + 30), 0, "---"), "Reinicio 59m");
+        assert_eq!(reset_text(Some(177 * 60), 0, "---"), "Reinicio 2h 57m");
+        assert_eq!(reset_text(Some(5 * 1440 * 60 + 11 * 3600), 0, "---"), "Reinicio 5d 11h");
     }
 
     #[test]
