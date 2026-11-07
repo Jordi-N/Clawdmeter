@@ -1,6 +1,10 @@
 // ESP32 radio layer for host_wifi.cpp: station mode and mDNS. Every call is
 // non-blocking except the first WiFi.mode(), which brings the driver up once.
-#include "host_wifi.h"
+// It lives under boards/ so `-<boards/>` keeps it out of every env by default:
+// PlatformIO's library finder ignores #if, so a shared file including
+// <WiFi.h> links the WiFi stack into boards without it (the classic ESP32s
+// then overflow DRAM). WiFi boards add `+<boards/wifi_esp/>`.
+#include "../../host_wifi.h"
 #if BOARD_HAS_WIFI
 #include <WiFi.h>
 #include <ESPmDNS.h>

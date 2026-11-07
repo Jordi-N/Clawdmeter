@@ -25,7 +25,7 @@ WifiSt host_wifi_state(void);
 size_t host_wifi_status(char* buf, size_t cap);
 bool host_wifi_take_changed(void);     // status changed since the last call
 
-// Radio layer under host_wifi.cpp: wifi_radio_esp.cpp on hardware,
+// Radio layer under host_wifi.cpp: boards/wifi_esp/wifi_radio_esp.cpp on hardware,
 // boards/sim/wifi_radio_sim.cpp in the simulator.
 void radio_init(void);
 void radio_begin(const char* ssid, const char* pass);
