@@ -130,16 +130,33 @@ static bool parse_json(const char* json, UsageData* out) {
 // this one, after removing the device) can pair. The PWR hold gesture, the
 // touch hold on boards without PWR, and the `unpair` serial command all end
 // here.
+// Bluetooth stays on until then after a pair gesture, even with the app on
+// USB or WiFi, so another computer can pair (0 = no gesture).
+static uint32_t pair_open_until = 0;
+
 static void clear_pairing(const char* why) {
     Serial.printf("Pair: clearing bonds (%s), advertising\n", why);
+    pair_open_until = (millis() + 120000) | 1;
     ble_clear_bonds();
     ui_set_pair_hint(PAIR_HINT_CLEARED);
 }
 
 // ---- Serial command buffer ----
-#define CMD_BUF_SIZE 64
+// Room for an app line (the app caps writes at 500 bytes) besides commands.
+#define CMD_BUF_SIZE 520
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
+
+// ---- Host links: USB > WiFi > BLE ----
+// The app may talk over USB serial (JSON lines, like TCP but without auth:
+// the cable is the trust), over TCP or over BLE. USB counts as attached while
+// lines keep coming; the app sends {"hb":1} when it has nothing else.
+enum Link { LINK_BLE, LINK_TCP, LINK_USB };
+#define USB_HOST_TIMEOUT_MS 45000
+static uint32_t usb_last_ms = 0;
+static bool usb_seen = false;
+static bool usb_host(void) { return usb_seen && millis() - usb_last_ms < USB_HOST_TIMEOUT_MS; }
+static void on_usb_line(const char* line);
 
 static void send_screenshot() {
 #ifndef BOARD_HAS_PSRAM
@@ -193,7 +210,8 @@ static void check_serial_cmd() {
         char c = Serial.read();
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
-            if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
+            if (cmd_buf[0] == '{') on_usb_line(cmd_buf);   // the app, over USB
+            else if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
             else if (strcmp(cmd_buf, "chime") == 0 || strcmp(cmd_buf, "buzz") == 0) sound_hal_chime();
             else if (strncmp(cmd_buf, "chime ", 6) == 0) {
                 // Dev tool for tuning a board's speaker: `chime <gain> [volume]`,
@@ -375,16 +393,48 @@ static void touch_pair_tick(void) {
 }
 
 // Where a line came from, so its ack goes back the same way.
-enum Link { LINK_BLE, LINK_TCP };
-
 static void reply(Link link, const char* line) {
     if (link == LINK_BLE) ble_send_line(line);
-    else host_wifi_send(line);
+    else if (link == LINK_TCP) host_wifi_send(line);
+    else Serial.println(line);
 }
 
 static void send_all(const char* line) {
     ble_send_line(line);
     host_wifi_send(line);
+    if (usb_host()) Serial.println(line);
+}
+
+// The link the app is on, best first.
+static Link host_link(void) {
+    if (usb_host()) return LINK_USB;
+    if (host_wifi_client()) return LINK_TCP;
+    return LINK_BLE;
+}
+
+// A key for Claude Code. Over USB or WiFi the app types it on the computer
+// ({"key":...,"down":...}); over BLE the device is the keyboard. Returns the
+// link used, so the release goes the same way.
+static Link host_key_press(const char* name, uint8_t hid, uint8_t mod) {
+    const Link l = host_link();
+    if (l == LINK_BLE) {
+        ble_keyboard_press(hid, mod);
+    } else {
+        char line[48];
+        snprintf(line, sizeof(line), "{\"key\":\"%s\",\"down\":true}", name);
+        reply(l, line);
+    }
+    return l;
+}
+
+static void host_key_release(Link l, const char* name) {
+    if (l == LINK_BLE) {
+        ble_keyboard_release();
+    } else {
+        char line[48];
+        snprintf(line, sizeof(line), "{\"key\":\"%s\",\"down\":false}", name);
+        reply(l, line);
+    }
 }
 
 static bool got_data = false;   // some usage line arrived (any link)
@@ -394,6 +444,26 @@ static bool got_data = false;   // some usage line arrived (any link)
 // usage keys or come alone; alone (no `ok`) they must skip the usage path,
 // whose absent keys would read as zeros.
 static void handle_line(const char* json, Link link) {
+    // Keepalive: the link is up, nothing else.
+    if (strcmp(json, "{\"hb\":1}") == 0) {
+        reply(link, "{\"ack\":true}");
+        return;
+    }
+    // Power, from the app's Device page: rest (dark panel, a press or
+    // "wake" brings it back) or a real power-off (only PWR turns it on).
+    if (strcmp(json, "{\"power\":\"sleep\"}") == 0 || strcmp(json, "{\"power\":\"wake\"}") == 0) {
+        const bool sleep = json[10] == 's';
+        Serial.printf("Power: %s (asked by the app)\n", sleep ? "rest" : "wake");
+        idle_rest(sleep);
+        reply(link, "{\"ack\":true}");
+        return;
+    }
+    if (strcmp(json, "{\"power\":\"off\"}") == 0) {
+        reply(link, "{\"ack\":true}");
+        delay(100);   // let the ack leave before the power goes
+        if (!power_hal_shutdown()) reply(link, "{\"err\":true}");
+        return;
+    }
     static AgentsData agents;
     bool agents_only = false;
     if (agents_parse(json, &agents, &agents_only)) agents_view_set(&agents);
@@ -462,6 +532,24 @@ static void handle_line(const char* json, Link link) {
 
 static void on_tcp_line(const char* line) { handle_line(line, LINK_TCP); }
 
+// A JSON line on USB serial. A new USB host gets what a TCP host gets at
+// auth: the WiFi status, and a refresh request when there's no data yet.
+static void on_usb_line(const char* line) {
+    const bool was = usb_host();
+    usb_last_ms = millis();
+    usb_seen = true;
+    if (!was) {
+        Serial.println("USB: app attached");
+        char w[96], st[112];
+        if (host_wifi_status(w, sizeof(w))) {
+            snprintf(st, sizeof(st), "{\"wifi\":%s}", w);
+            Serial.println(st);
+        }
+        if (!got_data) Serial.println("{\"req\":true}");
+    }
+    handle_line(line, LINK_USB);
+}
+
 // WiFi status to the app on every change (BLE TX and the TCP host), and once
 // to each new host: a TCP host right after auth, plus a refresh request if
 // there's no data yet (the REQ characteristic's job on BLE); a BLE host 2 s
@@ -510,6 +598,7 @@ void loop() {
     if (director_take_dismissed()) {
         ble_send_dismiss();
         host_wifi_send("{\"dismiss\":true}");
+        if (usb_host()) Serial.println("{\"dismiss\":true}");
     }
     // Rotation transition (blank + ramp) would fight the idle fade — skip
     // ticks while the panel is dark. A rotation that happens during sleep
@@ -528,6 +617,7 @@ void loop() {
     {
         static bool primary_was = false;
         static bool primary_wake_swallowed = false;
+        static Link primary_link = LINK_BLE;
         bool primary_now = input_hal_is_held(INPUT_BTN_PRIMARY);
         if (primary_now != primary_was) {
             if (primary_now) {
@@ -535,10 +625,10 @@ void loop() {
                 // No touchscreen: BOOT dismisses an active alert first and is
                 // not a push-to-talk press then.
                 else if (director_button(true)) primary_wake_swallowed = true;
-                else { ble_keyboard_press(0x2C, 0); }                     // HID Space, no mods
+                else primary_link = host_key_press("space", 0x2C, 0);   // HID Space, no mods
             } else {
                 if (primary_wake_swallowed) primary_wake_swallowed = false;
-                else                        ble_keyboard_release();
+                else                        host_key_release(primary_link, "space");
             }
             primary_was = primary_now;
         }
@@ -546,14 +636,18 @@ void loop() {
         if (board_caps().button_count >= 2) {
             static bool secondary_was = false;
             static bool secondary_wake_swallowed = false;
+            static Link secondary_link = LINK_BLE;
             bool secondary_now = input_hal_is_held(INPUT_BTN_SECONDARY);
             if (secondary_now != secondary_was) {
                 if (secondary_now) {
                     if (idle_consume_wake_press()) secondary_wake_swallowed = true;
-                    else { ble_keyboard_press(0x2B, 0x02); director_button(false); }  // HID Tab + LEFT_SHIFT
+                    else {   // HID Tab + LEFT_SHIFT
+                        secondary_link = host_key_press("shift_tab", 0x2B, 0x02);
+                        director_button(false);
+                    }
                 } else {
                     if (secondary_wake_swallowed) secondary_wake_swallowed = false;
-                    else                          ble_keyboard_release();
+                    else                          host_key_release(secondary_link, "shift_tab");
                 }
                 secondary_was = secondary_now;
             }
@@ -575,7 +669,7 @@ void loop() {
     // Connected to a host = BLE link or an authenticated TCP client; the UI
     // (status line, pairing hint, stale view) treats both the same.
     ble_state_t bs = ble_get_state();
-    if (host_wifi_client()) bs = BLE_STATE_CONNECTED;
+    if (host_link() != LINK_BLE) bs = BLE_STATE_CONNECTED;
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());
@@ -600,6 +694,18 @@ void loop() {
     if (ble_has_data()) handle_line(ble_get_data(), LINK_BLE);
     host_wifi_tick(on_tcp_line);
     report_wifi();
+
+    // Bluetooth is off while the app is on USB or WiFi: after 3 s of it, so
+    // a blip doesn't drop the BLE keyboard, and back on as soon as neither
+    // is there. A pair gesture keeps it on for its window.
+    {
+        static uint32_t other_since = 0;   // 0 = the app isn't on USB/WiFi
+        if (host_link() == LINK_BLE) other_since = 0;
+        else if (!other_since) other_since = millis() | 1;
+        const bool pairing = pair_open_until && (int32_t)(pair_open_until - millis()) > 0;
+        if (!pairing) pair_open_until = 0;
+        ble_set_radio(pairing || !other_since || millis() - other_since < 3000);
+    }
 
     // The mood group also moves without a payload: the 15-min window decays
     // to Idle on its own and a hook activity lift expires. Nothing needs to

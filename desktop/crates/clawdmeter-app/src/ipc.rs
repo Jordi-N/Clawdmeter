@@ -15,12 +15,16 @@
 //!   process takes the file (rename, read, delete) every tick.
 //! - `window-commands`: `show <page>` lines for the window process, taken the
 //!   same way: bring the window to the front on that page.
+//! - `usb-claim`: until when the window needs the serial port (flashing, the
+//!   Device page's probe). The daemon drops its USB link and leaves the port
+//!   alone until then: a serial port has one owner at a time on Windows.
 
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use clawdmeter_core::wifi::{Secret, Transport, WifiStatus};
+use clawdmeter_core::wifi::{Power, Secret, Transport, WifiStatus};
 use clawdmeter_core::Paths;
 use serde::{Deserialize, Serialize};
 
@@ -217,6 +221,7 @@ impl StatusSnapshot {
         match self.transport? {
             Transport::Wifi => Some("WiFi"),
             Transport::Ble => Some("Bluetooth"),
+            Transport::Usb => Some("USB"),
         }
     }
 
@@ -293,6 +298,43 @@ pub fn read_status(paths: &Paths) -> Option<StatusSnapshot> {
     serde_json::from_slice(&fs::read(status_file(paths)).ok()?).ok()
 }
 
+/// `<state>/usb-claim`: unix seconds until which the window holds the port.
+pub fn usb_claim_file(paths: &Paths) -> PathBuf {
+    paths.state_dir.join("usb-claim")
+}
+
+/// Claim the serial port for `secs`, then wait (at most 3 s) until the
+/// daemon has let go of it. Blocking: call it off the UI thread.
+pub fn claim_usb(paths: &Paths, secs: i64) {
+    let until = clawdmeter_core::unix_now() + secs;
+    let wrote = fs::create_dir_all(&paths.state_dir).and_then(|()| fs::write(usb_claim_file(paths), until.to_string()));
+    if let Err(e) = wrote {
+        log::warn!("couldn't claim the USB port: {e}");
+        return;
+    }
+    let on_usb = || {
+        read_status(paths)
+            .is_some_and(|s| s.alive(clawdmeter_core::unix_now()) && s.transport == Some(Transport::Usb))
+    };
+    if !on_usb() {
+        return;
+    }
+    let end = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < end && on_usb() {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The link's reader thread closes its handle within one read timeout.
+    std::thread::sleep(Duration::from_millis(300));
+}
+
+/// The window holds the serial port at `now`.
+pub fn usb_claimed(paths: &Paths, now: i64) -> bool {
+    fs::read_to_string(usb_claim_file(paths))
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .is_some_and(|until| now < until)
+}
+
 /// Requests a window sends to the tray process.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
@@ -315,6 +357,8 @@ pub enum AppCommand {
         /// Its password.
         pass: Secret,
     },
+    /// Rest, wake or power off the device.
+    Power(Power),
     /// Stop the daemon and exit.
     Quit,
 }
@@ -335,6 +379,7 @@ impl AppCommand {
             AppCommand::Mute(on) => format!("mute {}", if *on { "on" } else { "off" }),
             AppCommand::Open(w) => format!("open {w}"),
             AppCommand::CheckUpdate => "check-update".into(),
+            AppCommand::Power(p) => format!("power {}", p.as_str()),
             AppCommand::Quit => "quit".into(),
         }
     }
@@ -355,6 +400,7 @@ impl AppCommand {
             ("mute", Some("off")) => AppCommand::Mute(false),
             ("open", Some(w)) if crate::Page::parse(w).is_some() => AppCommand::Open(w.to_owned()),
             ("check-update", None) => AppCommand::CheckUpdate,
+            ("power", Some(p)) => AppCommand::Power(Power::parse(p)?),
             ("quit", None) => AppCommand::Quit,
             _ => return None,
         })
@@ -491,6 +537,20 @@ mod tests {
         assert!(!window_open_elsewhere(&paths));
         let _ = fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn usb_claim_runs_out() {
+        let dir = std::env::temp_dir().join(format!("clawdmeter-usbclaim-{}", std::process::id()));
+        let paths = Paths::under(&dir);
+        let now = clawdmeter_core::unix_now();
+        assert!(!usb_claimed(&paths, now), "no claim yet");
+        // No daemon on USB: it doesn't wait.
+        claim_usb(&paths, 5);
+        assert!(usb_claimed(&paths, now));
+        assert!(!usb_claimed(&paths, now + 6));
+        let _ = fs::remove_dir_all(dir);
+    }
+
     use clawdmeter_core::usage::{UsageReading, Window};
     use clawdmeter_core::EngineStatus;
 
@@ -591,6 +651,8 @@ mod tests {
             AppCommand::Open("hooks".into()),
             AppCommand::Forget,
             AppCommand::WifiSend { ssid: "Mi casa #2".into(), pass: Secret("p a\"ss\n".into()) },
+            AppCommand::Power(Power::Sleep),
+            AppCommand::Power(Power::Off),
             AppCommand::Quit,
         ];
         for c in &cmds {

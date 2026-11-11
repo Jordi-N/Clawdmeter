@@ -85,6 +85,13 @@ void host_wifi_apply(const WifiCmd* c) {
         break;
     }
     save();
+    // The ack goes out before the next tick: report the attempt that is about
+    // to start, not the previous result (a stale "fail" read as a failure).
+    // restart makes the tick begin it from OFF, so the radio is started.
+    if (enabled && ssid[0] && (restart || st == WIFI_ST_OFF)) {
+        restart = true;
+        set_st(WIFI_ST_CONNECTING);
+    }
 }
 
 static void go_down(void) {

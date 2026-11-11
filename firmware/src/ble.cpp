@@ -64,6 +64,9 @@ static NimBLECharacteristic* req_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
+// Off while the app talks over USB or WiFi (ble_set_radio).
+static bool radio_on = true;
+static uint32_t radio_kick_ms = 0;   // last disconnect sent while off
 
 // One-shot supervision-timeout pushback (see onConnParamsUpdate). Written by
 // NimBLE host-task callbacks, consumed by ble_tick() on the loop task.
@@ -383,6 +386,14 @@ void ble_init(void) {
 }
 
 void ble_tick(void) {
+    if (!radio_on) {
+        // A central that got in before advertising stopped is let go.
+        if (server && server->getConnectedCount() > 0 && millis() - radio_kick_ms >= 1000) {
+            radio_kick_ms = millis();
+            ble_disconnect_all();
+        }
+        return;
+    }
     if (need_advertise) {
         need_advertise = false;
         start_advertising();
@@ -462,6 +473,21 @@ void ble_disconnect_all(void) {
         handles[n++] = server->getPeerInfo(i).getConnHandle();
     }
     for (uint8_t i = 0; i < n; i++) server->disconnect(handles[i]);
+}
+
+void ble_set_radio(bool on) {
+    if (on == radio_on) return;
+    radio_on = on;
+    if (on) {
+        need_advertise = true;   // ble_tick starts it
+        Serial.println("BLE: on (no USB/WiFi host)");
+        return;
+    }
+    NimBLEDevice::getAdvertising()->stop();
+    radio_kick_ms = millis();
+    ble_disconnect_all();
+    state = BLE_STATE_DISCONNECTED;
+    Serial.println("BLE: off (host on USB/WiFi)");
 }
 
 bool ble_has_data(void) {

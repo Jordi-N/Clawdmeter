@@ -137,17 +137,20 @@ pub trait FlashHardware: Send + Sync + 'static {
     ) -> Result<(), DeviceError>;
 }
 
-/// The board on USB, through `clawdmeter_flash::device`.
-pub struct Usb;
+/// The board on USB, through `clawdmeter_flash::device`. Each use of the
+/// port first claims it from the daemon's USB link (`ipc::claim_usb`).
+pub struct Usb(pub Paths);
 
 impl FlashHardware for Usb {
     fn ports(&self) -> Vec<String> {
         device::list_ports().into_iter().map(|p| p.path).collect()
     }
     fn probe_info(&self, port: &str) -> Option<FirmwareInfo> {
+        crate::ipc::claim_usb(&self.0, 5);
         device::probe_info(port, Duration::from_millis(1500)).ok().flatten()
     }
     fn probe_chip(&self, port: &str) -> Result<ChipInfo, DeviceError> {
+        crate::ipc::claim_usb(&self.0, 10);
         device::probe_chip(port)
     }
     fn flash(
@@ -157,7 +160,11 @@ impl FlashHardware for Usb {
         board: &BoardImage,
         progress: &mut dyn FnMut(FlashProgress),
     ) -> Result<(), DeviceError> {
-        device::flash_merged(port, image, board, progress)
+        // Writing plus the reboot and the check after it.
+        crate::ipc::claim_usb(&self.0, 300);
+        let r = device::flash_merged(port, image, board, progress);
+        crate::ipc::claim_usb(&self.0, 15);
+        r
     }
 }
 
@@ -243,7 +250,8 @@ impl FlasherView {
     /// flasher is on screen ([`FlasherView::set_active`]). `manifest`: a local
     /// release `manifest.json` to use instead of GitHub.
     pub fn new(paths: Paths, manifest: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
-        Self::with_hardware(paths, manifest, Arc::new(Usb), cx)
+        let hw = Arc::new(Usb(paths.clone()));
+        Self::with_hardware(paths, manifest, hw, cx)
     }
 
     /// [`FlasherView::new`] with the USB side swapped out.

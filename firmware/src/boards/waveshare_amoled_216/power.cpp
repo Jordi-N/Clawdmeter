@@ -94,6 +94,13 @@ bool power_hal_pwr_long_pressed(void) {
     return false;
 }
 
+bool power_hal_shutdown(void) {
+    Serial.println("Power: shutting down (asked by the app)");
+    Serial.flush();
+    pmu.shutdown();
+    return true;
+}
+
 bool power_hal_pwr_released(void) {
     if (pwr_released_flag) { pwr_released_flag = false; return true; }
     return false;

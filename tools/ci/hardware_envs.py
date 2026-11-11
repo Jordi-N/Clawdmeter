@@ -9,6 +9,7 @@ board is a new [env:...] block; CI picks it up without a workflow edit.
     python3 tools/ci/hardware_envs.py [--ini firmware/platformio.ini]
     python3 tools/ci/hardware_envs.py --native   # host envs instead
     python3 tools/ci/hardware_envs.py --matrix   # [{"env": ..., "board": ...}]
+    python3 tools/ci/hardware_envs.py --only waveshare_amoled_216   # just these
 
 --matrix emits objects for a `matrix.include`, so a job can key its
 toolchain cache on the board (all S3 envs share one cache, all C6 envs another).
@@ -49,10 +50,18 @@ def main() -> int:
                     help="list native (host) envs instead of hardware envs")
     ap.add_argument("--matrix", action="store_true",
                     help="emit [{env, board}] objects instead of bare names")
+    ap.add_argument("--only", action="append", metavar="ENV",
+                    help="keep only this env (repeatable); an unknown name is an error")
     args = ap.parse_args()
 
     envs = read_envs(args.ini)
     picked = [(n, o) for n, o in envs if is_native(o) == args.native]
+    if args.only:
+        missing = sorted(set(args.only) - {n for n, _ in picked})
+        if missing:
+            print(f"unknown envs in {args.ini}: {', '.join(missing)}", file=sys.stderr)
+            return 1
+        picked = [(n, o) for n, o in picked if n in args.only]
     if not picked:
         print(f"no matching envs in {args.ini}", file=sys.stderr)
         return 1

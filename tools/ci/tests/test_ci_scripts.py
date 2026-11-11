@@ -225,6 +225,21 @@ class HardwareEnvsTest(unittest.TestCase):
             self.assertEqual(json.loads(run("hardware_envs.py", "--ini", str(p), "--matrix").stdout),
                              [{"env": "board_a", "board": "esp32-s3-devkitc-1"}])
 
+    def test_only_keeps_the_named_envs(self):
+        ini = "[env:board_a]\nboard = a\n\n[env:board_b]\nboard = b\n\n[env:sim]\nplatform = native\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "platformio.ini"
+            p.write_text(ini)
+            self.assertEqual(json.loads(run("hardware_envs.py", "--ini", str(p), "--only", "board_b").stdout),
+                             ["board_b"])
+            # A typo fails the job instead of building nothing.
+            self.assertEqual(run("hardware_envs.py", "--ini", str(p), "--only", "board_c").returncode, 1)
+
+    def test_ci_builds_only_the_owners_board(self):
+        for wf in ("firmware.yml", "release.yml"):
+            text = (CI.parents[1] / ".github" / "workflows" / wf).read_text(encoding="utf-8")
+            self.assertIn("ONLY: --only waveshare_amoled_216", text, wf)
+
 
 if __name__ == "__main__":
     unittest.main()

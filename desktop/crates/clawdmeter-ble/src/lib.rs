@@ -494,6 +494,13 @@ pub enum DeviceEvent {
     Dismissed,
     /// TX `{"wifi":{...}}`: its WiFi state (fork firmware only).
     Wifi(WifiStatus),
+    /// A button for the app to type on this computer (USB/WiFi links only).
+    Key {
+        /// `space` | `shift_tab`.
+        name: String,
+        /// Pressed (true) or released.
+        down: bool,
+    },
 }
 
 /// The device's events, in order.
@@ -518,6 +525,7 @@ pub fn line_event(text: &str) -> Option<DeviceEvent> {
         DeviceLine::Refresh => Some(DeviceEvent::Refresh),
         DeviceLine::Dismissed => Some(DeviceEvent::Dismissed),
         DeviceLine::Wifi(s) => Some(DeviceEvent::Wifi(s)),
+        DeviceLine::Key { name, down } => Some(DeviceEvent::Key { name, down }),
         DeviceLine::AuthOk => None,
     }
 }

@@ -24,3 +24,8 @@ bool power_hal_pwr_long_pressed(void);
 // Edge-triggered: true once on the PWR release edge, then clears. Completes
 // or cancels the hold-to-pair gesture.
 bool power_hal_pwr_released(void);
+
+// Optional: cut the power like a long PWR hold does (PMU boards). Returns
+// false where the board can't; the weak default in board_info_default.cpp.
+// Only a PWR press turns the board back on.
+bool power_hal_shutdown(void);

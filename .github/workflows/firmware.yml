@@ -23,6 +23,11 @@ concurrency:
   group: firmware-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # This fork only builds the owner's board (Waveshare AMOLED 2.16). Every
+  # env still compiles locally; add `--only <env>` here to ship another.
+  ONLY: --only waveshare_amoled_216
+
 jobs:
   envs:
     name: List hardware envs
@@ -32,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: envs
-        run: echo "matrix=$(python3 tools/ci/hardware_envs.py --matrix)" >> "$GITHUB_OUTPUT"
+        run: echo "matrix=$(python3 tools/ci/hardware_envs.py --matrix $ONLY)" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.env }}

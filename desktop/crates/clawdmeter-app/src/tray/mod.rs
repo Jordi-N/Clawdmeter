@@ -222,6 +222,7 @@ impl TrayApp {
             }
             AppCommand::CheckUpdate => self.check_now.store(true, Ordering::SeqCst),
             AppCommand::WifiSend { ssid, pass } => self.send(Command::ProvisionWifi { ssid, pass }),
+            AppCommand::Power(p) => self.send(Command::Power(p)),
             AppCommand::Quit => return false,
         }
         true

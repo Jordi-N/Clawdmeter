@@ -1,6 +1,6 @@
 //! The daemon runtime: drives [`clawdmeter_core::Engine`] with real I/O
-//! (the `claude` CLI, events.log, attention files, the device link over BLE
-//! or WiFi).
+//! (the `claude` CLI, events.log, attention files, the device link over USB,
+//! WiFi or BLE, best first).
 //!
 //! It runs on its own thread with a current-thread tokio runtime, so the GUI
 //! event loop never shares a reactor with it. The UI talks to it through a
@@ -20,12 +20,12 @@ use clawdmeter_core::engine::PollPlan;
 use clawdmeter_core::events::EventTail;
 use clawdmeter_core::probe;
 use clawdmeter_core::usage;
-use clawdmeter_core::wifi::{self, Connection, Secret, Transport, WifiStatus};
+use clawdmeter_core::wifi::{self, Connection, Power, Secret, Transport, WifiStatus};
 use clawdmeter_core::{unix_now, ConfigFile, Engine, EngineStatus, HostClock, Paths, Settings, WriteKind};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::transport::{self, Link, TcpLink};
+use crate::transport::{self, Link, TcpLink, UsbLink};
 
 /// Loop tick: events reach the device within about this long.
 const TICK: Duration = Duration::from_millis(500);
@@ -49,13 +49,15 @@ pub enum Command {
     /// Mute the alert chimes (device and this computer) for this run,
     /// whatever the config says.
     SetChimesMuted(bool),
-    /// Send a WiFi network to the device over BLE (fork firmware).
+    /// Send a WiFi network to the device over BLE or USB (fork firmware).
     ProvisionWifi {
         /// Network name.
         ssid: String,
         /// Its password.
         pass: Secret,
     },
+    /// Rest, wake or power off the device (fork firmware).
+    Power(Power),
     /// Stop the daemon thread.
     Shutdown,
 }
@@ -152,6 +154,7 @@ type PollResults = Vec<(PathBuf, probe::Polled)>;
 enum Attempt {
     Ble(Result<(DeviceLink, DeviceEvents), LinkError>),
     Wifi(std::io::Result<(TcpLink, DeviceEvents)>),
+    Usb(std::io::Result<(UsbLink, DeviceEvents)>),
 }
 
 /// Read each account of a poll plan: the probe, `/usage`, or a reading known
@@ -176,7 +179,7 @@ fn edit_config(paths: &Paths, edit: impl FnOnce(&mut ConfigFile)) -> std::io::Re
     cfg.save(&paths.config_file)
 }
 
-/// Send the network to the device over a BLE link: makes (and saves) the
+/// Send the network to the device over a BLE or USB link: makes (and saves) the
 /// TCP key first if there is none, so a key the device stored is never lost.
 async fn provision(paths: &Paths, link: &Link, s: &Settings, ssid: &str, pass: &Secret) -> Result<(), String> {
     let key = match &s.wifi_key {
@@ -194,7 +197,7 @@ async fn provision(paths: &Paths, link: &Link, s: &Settings, ssid: &str, pass: &
     }
     link.write(wifi::provision_line(ssid, pass, &key).as_bytes())
         .await
-        .map_err(|e| format!("No se pudo enviar por Bluetooth: {e}"))
+        .map_err(|e| format!("No se pudo enviar al aparato: {e}"))
 }
 
 /// The daemon loop. Returns on [`Command::Shutdown`] or when every command
@@ -244,6 +247,11 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut reconnect = Reconnect::default();
     // The WiFi link's own retry schedule; while it waits, Bluetooth is tried.
     let mut wifi_retry = Reconnect::default();
+    // The USB link's: a board on a port with firmware that doesn't answer
+    // there isn't asked again every tick.
+    let mut usb_retry = Reconnect::default();
+    // The last write on the current link, for the USB keepalive.
+    let mut link_written_at = 0;
     let mut wifi = WifiInfo::default();
     // The radio on/off line already sent on this link.
     let mut radio_sent: Option<bool> = None;
@@ -282,6 +290,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 0);
                     wifi_retry.retry_in(now, 0);
+                    usb_retry.retry_in(now, 0);
                 }
                 Ok(Command::SetChimesMuted(m)) => {
                     chimes_muted = m;
@@ -298,8 +307,8 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     // Fresh: the key may have been written since the last re-read.
                     let s = Settings::load(&paths).unwrap_or_else(|_| engine.settings().clone());
                     let sent = match &link {
-                        Some(l @ Link::Ble(_)) => provision(&paths, l, &s, &ssid, &pass).await,
-                        _ => Err("Conecta el aparato por Bluetooth para enviarle la red.".into()),
+                        Some(l @ (Link::Ble(_) | Link::Usb(_))) => provision(&paths, l, &s, &ssid, &pass).await,
+                        _ => Err("Conecta el aparato por USB o Bluetooth para enviarle la red.".into()),
                     };
                     wifi.send = Some(match sent {
                         Ok(()) => {
@@ -314,6 +323,13 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     });
                     last_settings = 0;
                 }
+                Ok(Command::Power(p)) => match &link {
+                    Some(l) => match l.write(p.line().as_bytes()).await {
+                        Ok(()) => log::info!("device power: {}", p.as_str()),
+                        Err(e) => log::warn!("device power {}: {e}", p.as_str()),
+                    },
+                    None => log::info!("device power {}: no link", p.as_str()),
+                },
                 Ok(Command::Shutdown) | Err(mpsc::error::TryRecvError::Disconnected) => {
                     if let Some(l) = link.take() {
                         l.close().await;
@@ -386,6 +402,13 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                             last_settings = 0;
                         }
                         wifi.device = Some(st);
+                    }
+                    DeviceEvent::Key { name, down } => {
+                        // Over BLE the device types it itself, as a keyboard.
+                        if link.as_ref().is_some_and(|l| l.transport() != Transport::Ble) {
+                            log::debug!("device key {name} {}", if down { "down" } else { "up" });
+                            crate::keys::send(&name, down);
+                        }
                     }
                 }
             }
@@ -465,6 +488,24 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     }
                     None
                 }
+                Ok(Attempt::Usb(Ok((l, rx)))) => {
+                    log::info!("connected over USB ({})", l.port());
+                    usb_retry.connected();
+                    // Moving up from WiFi or Bluetooth.
+                    if let Some(old) = link.take() {
+                        old.close().await;
+                    }
+                    Some((Link::Usb(l), rx))
+                }
+                Ok(Attempt::Usb(Err(e))) => {
+                    let wait = usb_retry.failed(now);
+                    if wait == 1 {
+                        log::info!("USB: {e}");
+                    } else {
+                        log::debug!("USB: {e}; retrying in {wait}s");
+                    }
+                    None
+                }
                 Err(e) => {
                     log::error!("connect task failed: {e}");
                     None
@@ -477,11 +518,16 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                         device_key.clone().unwrap_or_else(|| t.addr().ip().to_string()),
                         Some(clawdmeter_ble::DEVICE_NAME.into()),
                     ),
+                    Link::Usb(u) => (
+                        device_key.clone().unwrap_or_else(|| u.port().to_owned()),
+                        Some(clawdmeter_ble::DEVICE_NAME.into()),
+                    ),
                 };
                 wifi.addr = match &l {
                     Link::Wifi(t) => Some(t.addr().ip().to_string()),
-                    Link::Ble(_) => None,
+                    Link::Ble(_) | Link::Usb(_) => None,
                 };
+                link_written_at = now;
                 link_state = LinkState::Connected { key, name, via: l.transport() };
                 link = Some(l);
                 device_events = Some(rx);
@@ -503,6 +549,17 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             link_state = LinkState::Searching;
             reconnect.retry_in(now, 0);
         }
+        // The window needs the serial port (flashing, the Device page's
+        // probe): let go of it until the claim runs out.
+        let usb_claimed = crate::ipc::usb_claimed(&paths, now);
+        if usb_claimed && link.as_ref().is_some_and(|l| l.transport() == Transport::Usb) {
+            link.take().expect("checked").close().await;
+            log::info!("USB port claimed by the window; letting go");
+            device_events = None;
+            link_state = LinkState::Searching;
+            reconnect.retry_in(now, 0);
+            wifi_retry.retry_in(now, 0);
+        }
         // The OS saw the device come back (BlueZ reconnected the bonded
         // device, or a scan saw it advertise): don't sit out the wait.
         while let Ok(w) = wakeups.try_recv() {
@@ -520,7 +577,18 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         }
         if connecting.is_none() {
             let current = link.as_ref().map(Link::transport);
-            match wifi::next_attempt(wifi_ready, current, wifi_retry.due(now), reconnect.due(now)) {
+            // Ports are listed only when USB would be tried.
+            let usb_port = if !usb_claimed && current != Some(Transport::Usb) && usb_retry.due(now) {
+                clawdmeter_flash::device::list_ports().into_iter().next().map(|p| p.path)
+            } else {
+                None
+            };
+            let (wifi_due, ble_due) = (wifi_retry.due(now), reconnect.due(now));
+            match wifi::next_attempt(usb_port.is_some(), wifi_ready, current, wifi_due, ble_due) {
+                Some(Transport::Usb) => {
+                    let port = usb_port.expect("checked");
+                    connecting = Some(tokio::spawn(async move { Attempt::Usb(UsbLink::open(port).await) }));
+                }
                 Some(Transport::Wifi) => {
                     let (host, id, wc) = (s.wifi_host.clone(), device_key.clone(), wifi_cache.clone());
                     let key = s.wifi_key.clone().unwrap_or_default();
@@ -555,6 +623,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     link_state = LinkState::Searching;
                     reconnect.retry_in(now, 2);
                     wifi_retry.retry_in(now, 2);
+                    usb_retry.retry_in(now, 2);
                 }
             }
         }
@@ -589,6 +658,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Ok(()) => {
                         engine.mark_written(now, &w);
                         last_write_at = Some(now);
+                        link_written_at = now;
                     }
                     Err(e) => {
                         log::warn!("write failed: {e}");
@@ -598,8 +668,20 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                             link_state = LinkState::Searching;
                             reconnect.retry_in(now, 2);
                             wifi_retry.retry_in(now, 2);
+                            usb_retry.retry_in(now, 2);
                         }
                     }
+                }
+            }
+        }
+        // On USB the device knows the app is there only by its lines, and
+        // keeps Bluetooth off while they come: say so when there's nothing
+        // else to send.
+        if let Some(l @ Link::Usb(_)) = &link {
+            if now - link_written_at >= wifi::USB_HEARTBEAT_SECS {
+                match l.write(wifi::HEARTBEAT_LINE.as_bytes()).await {
+                    Ok(()) => link_written_at = now,
+                    Err(e) => log::warn!("USB keepalive failed: {e}"),
                 }
             }
         }

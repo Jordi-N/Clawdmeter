@@ -7,15 +7,19 @@
 //! values), so a hand-edited config and the GUI never disagree. The daemon
 //! re-reads the file every few seconds.
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clawdmeter_core::autostart::{self, LaunchMode};
 use clawdmeter_core::config::{AlertOn, AttentionAnim, ClockMode, ConfigFile, LIVELINESS_MAX};
-use clawdmeter_core::wifi::{Connection, Secret, Transport};
+use clawdmeter_core::wifi::{Connection, Power, Secret, Transport};
 use clawdmeter_core::{Paths, Settings};
 use clawdmeter_flash::device::{self, FirmwareInfo};
-use gpui::{div, img, prelude::*, px, Context, EventEmitter, PathPromptOptions, SharedString, Window};
+use gpui::{
+    canvas, div, img, prelude::*, px, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
+    PathPromptOptions, Pixels, Point, SharedString, UTF16Selection, Window,
+};
 
 use super::theme::{Theme, FONT_DISPLAY, FONT_MONO, R_M, R_S};
 use super::widgets::{
@@ -53,6 +57,8 @@ const TEST_ALERT_FAILED: Duration = Duration::from_secs(8);
 
 #[derive(Default)]
 struct DeviceState {
+    /// "Apagar" was clicked once: the next click confirms.
+    power_off_armed: bool,
     probing: bool,
     port: Option<String>,
     info: Option<FirmwareInfo>,
@@ -129,6 +135,7 @@ fn wifi_line(snap: Option<&StatusSnapshot>, s: &Settings) -> (Tone, String) {
             Some(ip) => (Tone::Ok, format!("Conectado por WiFi ({ip})")),
             None => (Tone::Ok, "Conectado por WiFi".into()),
         },
+        ("connected", Some(Transport::Usb)) => (Tone::Ok, "Conectado por USB · el WiFi queda de respaldo".into()),
         ("connected", _) if snap.wifi_fallback => (Tone::Warn, "WiFi no disponible, usando Bluetooth".into()),
         ("connected", _) if s.connection == Connection::Wifi && s.wifi_key.is_none() => {
             (Tone::Ok, "Conectado por Bluetooth · envía una red al aparato para usar WiFi".into())
@@ -153,6 +160,63 @@ fn device_wifi_text(w: &clawdmeter_core::wifi::WifiStatus) -> String {
 }
 
 impl EventEmitter<Navigate> for SettingsView {}
+
+/// Text typed into the WiFi boxes, after the platform applied the layout,
+/// Caps Lock and dead keys. Text always goes to the end of the focused box.
+impl EntityInputHandler for SettingsView {
+    fn text_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn selected_text_range(&mut self, _: bool, window: &mut Window, _: &mut Context<Self>) -> Option<UTF16Selection> {
+        let which = self.focused_wifi_field(window)?;
+        let end = self.wifi_text(which).0.encode_utf16().count();
+        Some(UTF16Selection { range: end..end, reversed: false })
+    }
+
+    fn marked_text_range(&self, _: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        None
+    }
+
+    fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+
+    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(which) = self.focused_wifi_field(window) {
+            self.push_wifi_text(which, text, cx);
+        }
+    }
+
+    // A dead key's accent on its own: the character arrives next, composed.
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        _: &str,
+        _: Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        Some(element_bounds)
+    }
+
+    fn character_index_for_point(&mut self, _: Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+        None
+    }
+}
 
 impl SettingsView {
     /// Build and load the config. USB is probed while the Device page is up.
@@ -335,11 +399,13 @@ impl SettingsView {
 
     fn probe_device(&mut self, cx: &mut Context<Self>) {
         self.device.probing = true;
+        let paths = self.paths.clone();
         run_blocking(
             cx,
-            || {
+            move || {
                 let port = device::list_ports().into_iter().next().map(|p| p.path);
                 let Some(port) = port else { return (None, None) };
+                ipc::claim_usb(&paths, 5);
                 let info = device::probe_info(&port, Duration::from_millis(1500)).ok().flatten();
                 (Some(port), info)
             },
@@ -361,9 +427,13 @@ impl SettingsView {
         let Some(port) = self.device.port.clone() else { return };
         self.device.busy = true;
         self.device.unpair = None;
+        let paths = self.paths.clone();
         run_blocking(
             cx,
-            move || device::query_json(&port, "unpair", "unpair", Duration::from_millis(1500)),
+            move || {
+                ipc::claim_usb(&paths, 5);
+                device::query_json(&port, "unpair", "unpair", Duration::from_millis(1500))
+            },
             |v, r, _| {
                 v.device.busy = false;
                 v.device.unpair = Some(match r {
@@ -549,6 +619,7 @@ impl SettingsView {
             None => (Tone::Plain, "Clawdmeter no se está ejecutando".into()),
             Some(s) => match s.link.as_str() {
                 "connected" if s.transport == Some(Transport::Wifi) => (Tone::Ok, "WiFi conectado".into()),
+                "connected" if s.transport == Some(Transport::Usb) => (Tone::Ok, "USB conectado".into()),
                 "connected" => (Tone::Ok, "Bluetooth conectado".into()),
                 "no_adapter" => (Tone::Bad, "Bluetooth no disponible".into()),
                 "connecting" => (Tone::Accent, "Conectando…".into()),
@@ -770,7 +841,58 @@ impl SettingsView {
         if let Some((tone, msg)) = &self.device.unpair {
             pane = pane.child(notice(t, *tone, msg.clone()));
         }
+        pane = self.power_section(t, pane, cx);
         self.wifi_section(t, window, pane, cx)
+    }
+
+    /// Rest, wake and power off, sent over whatever link the device is on.
+    fn power_section(&mut self, t: &Theme, pane: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        let linked = self.snap.as_ref().is_some_and(|s| s.link == "connected");
+        let armed = self.device.power_off_armed;
+        let (p1, p2) = (self.paths.clone(), self.paths.clone());
+        let me = cx.entity().downgrade();
+        let rest = div()
+            .flex()
+            .gap(px(6.))
+            .child(button(t, "power-sleep", "Reposo", ButtonKind::Small, linked, move |_, _, _| {
+                command(&p1, AppCommand::Power(Power::Sleep))
+            }))
+            .child(button(t, "power-wake", "Despertar", ButtonKind::Small, linked, move |_, _, _| {
+                command(&p2, AppCommand::Power(Power::Wake))
+            }));
+        let off = button(
+            t,
+            "power-off",
+            if armed { "Confirmar apagado" } else { "Apagar" },
+            ButtonKind::Small,
+            linked,
+            move |_, _, cx| {
+                let _ = me.update(cx, |v, cx| {
+                    if v.device.power_off_armed {
+                        command(&v.paths, AppCommand::Power(Power::Off));
+                    }
+                    v.device.power_off_armed = !v.device.power_off_armed;
+                    cx.notify();
+                });
+            },
+        );
+        pane.child(div().pt(px(18.)).child(subheading(t, "Encendido")))
+            .child(field(
+                t,
+                "Reposo",
+                "Apaga la pantalla. Vuelve con Despertar, un botón o un toque en la pantalla.",
+                rest,
+            ))
+            .child(field(
+                t,
+                "Apagar",
+                if armed {
+                    "Pulsa otra vez para apagarlo. Solo se enciende con el botón del medio."
+                } else {
+                    "Corta la corriente como mantener 8 s el botón del medio. Solo se enciende con ese botón."
+                },
+                off,
+            ))
     }
 
     /// The Device page's WiFi section: the link choice, its state, and the
@@ -816,16 +938,17 @@ impl SettingsView {
             "Se envía al aparato y no se guarda en este ordenador.",
             pass_box,
         ));
-        let on_ble = snap.is_some_and(|s| s.link == "connected" && s.transport == Some(Transport::Ble));
-        let ready = on_ble && !self.wifi_ssid.trim().is_empty();
+        let via = snap.filter(|s| s.link == "connected").and_then(|s| s.transport);
+        let can_send = matches!(via, Some(Transport::Ble | Transport::Usb));
+        let ready = can_send && !self.wifi_ssid.trim().is_empty();
         let (p, ssid, pass) = (self.paths.clone(), self.wifi_ssid.trim().to_owned(), self.wifi_pass.clone());
         pane = pane.child(field(
             t,
             "Enviar al aparato",
-            if on_ble {
-                "Le pasa la red por Bluetooth. Después usa WiFi en cuanto la encuentra."
-            } else {
-                "Hace falta que el aparato esté conectado por Bluetooth."
+            match via {
+                Some(Transport::Usb) => "Le pasa la red por USB. Usa WiFi cuando desconectes el cable.",
+                Some(Transport::Ble) => "Le pasa la red por Bluetooth. Después usa WiFi en cuanto la encuentra.",
+                _ => "Hace falta que el aparato esté conectado por USB o Bluetooth.",
             },
             button(t, "wifi-send", "Enviar al aparato", ButtonKind::Small, ready, move |_, _, _| {
                 command(&p, AppCommand::WifiSend { ssid: ssid.clone(), pass: Secret(pass.clone()) })
@@ -843,8 +966,11 @@ impl SettingsView {
     }
 
     /// A one-line text box: click to focus, type, Backspace, Ctrl/Cmd+V.
-    /// shortcut: no cursor movement, selection or IME; enough for a network
-    /// name and password. Upgrade to a real input if the app needs more text.
+    /// Typed text arrives through the platform's text input (`EntityInputHandler`
+    /// below), so Caps Lock, AltGr and dead keys work: gpui's `key_char` on
+    /// Windows ignores Caps Lock and reports AltGr as Ctrl.
+    /// shortcut: no cursor movement, selection or IME composition; enough for a
+    /// network name and password. Upgrade to a real input if the app needs more text.
     fn text_box(&self, t: &Theme, window: &Window, which: WifiField, cx: &mut Context<Self>) -> impl IntoElement {
         let (handle, value, id, placeholder) = match which {
             WifiField::Ssid => (&self.ssid_focus, &self.wifi_ssid, "wifi-ssid", "Nombre de la red"),
@@ -857,10 +983,12 @@ impl SettingsView {
             (false, WifiField::Ssid) => value.clone().into(),
         };
         let h = handle.clone();
+        let (input_focus, view) = (handle.clone(), cx.entity());
         div()
             .id(id)
             .debug_selector(move || id.to_owned())
             .track_focus(handle)
+            .relative()
             .flex()
             .items_center()
             .w(px(240.))
@@ -880,34 +1008,64 @@ impl SettingsView {
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |v, e: &gpui::KeyDownEvent, _, cx| v.type_key(which, e, cx)))
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, cx| {
+                        window.handle_input(&input_focus, ElementInputHandler::new(bounds, view), cx)
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(shown)
             .when(focused, |d| d.child(div().ml(px(1.)).w(px(1.)).h(px(16.)).bg(t.text)))
     }
 
-    fn type_key(&mut self, which: WifiField, e: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
-        let k = &e.keystroke;
-        let command_key = k.modifiers.control || k.modifiers.platform;
-        let (text, max) = match which {
+    /// The field's text and the device's limit for it, in bytes.
+    fn wifi_text(&mut self, which: WifiField) -> (&mut String, usize) {
+        match which {
             WifiField::Ssid => (&mut self.wifi_ssid, 32),
             WifiField::Pass => (&mut self.wifi_pass, 63),
-        };
-        if k.key == "backspace" {
-            text.pop();
-        } else if command_key && k.key == "v" {
-            if let Some(s) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                text.push_str(s.trim_end_matches(['\r', '\n']));
-            }
-        } else if let (false, Some(c)) = (command_key, &k.key_char) {
-            text.push_str(c);
-        } else {
-            return;
         }
-        // The device's limits, in bytes.
+    }
+
+    /// The WiFi field that has focus, if any.
+    fn focused_wifi_field(&self, window: &Window) -> Option<WifiField> {
+        if self.ssid_focus.is_focused(window) {
+            Some(WifiField::Ssid)
+        } else if self.pass_focus.is_focused(window) {
+            Some(WifiField::Pass)
+        } else {
+            None
+        }
+    }
+
+    /// Append to a field, cut to the device's limit on a character boundary.
+    fn push_wifi_text(&mut self, which: WifiField, s: &str, cx: &mut Context<Self>) {
+        let (text, max) = self.wifi_text(which);
+        text.push_str(s);
         while text.len() > max {
             text.pop();
         }
-        cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Backspace and paste; printable keys fall through to the text input.
+    fn type_key(&mut self, which: WifiField, e: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let k = &e.keystroke;
+        let command_key = (k.modifiers.control && !k.modifiers.alt) || k.modifiers.platform;
+        if k.key == "backspace" {
+            self.wifi_text(which).0.pop();
+            cx.notify();
+        } else if command_key && k.key == "v" {
+            if let Some(s) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                self.push_wifi_text(which, s.trim_end_matches(['\r', '\n']), cx);
+            }
+        } else {
+            return;
+        }
+        cx.stop_propagation();
     }
 
     fn accounts_pane(&mut self, t: &Theme, cx: &mut Context<Self>) -> gpui::Div {
@@ -1648,6 +1806,30 @@ mod tests {
         assert!(text.contains("poll_interval = 300"), "{text}");
         click(cx, "poll-0"); // Automatic removes the key again.
         assert!(!std::fs::read_to_string(&paths.config_file).unwrap().contains("poll_interval"));
+        let _ = std::fs::remove_dir_all(&paths.home);
+    }
+
+    #[gpui::test]
+    fn wifi_boxes_take_typed_text_as_is(cx: &mut TestAppContext) {
+        let paths = home("wifi-typing");
+        let p = paths.clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| SettingsView::with_usb(p, Page::Device, false, cx));
+        cx.run_until_parked();
+        view.update_in(cx, |v, window, _| window.focus(&v.ssid_focus));
+        cx.run_until_parked();
+        // Upper case and symbols reach the box through the text input, as typed.
+        cx.simulate_input("Mi@Red");
+        cx.simulate_keystrokes("backspace");
+        view.update_in(cx, |v, window, _| {
+            assert_eq!(v.wifi_ssid, "Mi@Re");
+            window.focus(&v.pass_focus);
+        });
+        cx.run_until_parked();
+        cx.simulate_input("AbC");
+        view.read_with(cx, |v, _| {
+            assert_eq!(v.wifi_pass, "AbC");
+            assert_eq!(v.wifi_ssid, "Mi@Re", "only the focused box changes");
+        });
         let _ = std::fs::remove_dir_all(&paths.home);
     }
 

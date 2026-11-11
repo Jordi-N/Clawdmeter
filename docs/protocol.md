@@ -104,3 +104,46 @@ one; a connection still authenticating doesn't disturb it. The device
 counts as connected to a host when BLE is connected or a TCP client is
 authenticated; the status line, pairing hint and stale logic treat both
 the same.
+
+## USB transport
+
+Fork only. The app writes the same JSON lines over the USB serial port
+(115200, the port the `info` command uses), one object per line; the
+firmware tells them from serial commands by the leading `{`. No auth: the
+cable is the trust. Every line is handled like a BLE RX write and answered
+with `{"ack":true}` or `{"err":true}` on the same port, mixed with the
+firmware's log lines (the app skips anything it can't read).
+
+- `{"hb":1}` is a keepalive: acked, nothing else. The app sends it to open
+  the link (no ack within 3 s means firmware without the USB link) and
+  every 15 s when it has nothing else to write.
+- The device counts a USB host as attached while lines keep coming (45 s).
+  A new one gets the WiFi status and, without data yet, `{"req":true}`.
+  `{"dismiss":true}` and WiFi status changes go to it too.
+
+## Link priority and the buttons
+
+The app uses USB, then WiFi, then Bluetooth, and moves up as soon as a
+better link answers. While the app is on USB or WiFi for 3 s, the device
+stops advertising and drops its Bluetooth links (Windows otherwise keeps
+the HID keyboard connected); Bluetooth comes back as soon as neither is
+there, and stays on for 2 minutes after a pair gesture.
+
+The buttons (Space for Claude Code's hold-to-talk, Shift+Tab) are BLE HID
+keys only on Bluetooth. On USB or WiFi the device sends
+`{"key":"space"|"shift_tab","down":true|false}` and the app types the key
+on the computer (Windows), repeating a held Space like a keyboard does.
+
+The window and the daemon share the serial port through `<state>/usb-claim`
+(unix seconds): while it's in the future the daemon leaves the port alone,
+so flashing and the Device page's `info` probe can open it.
+
+## Power
+
+Fork only, on any link, matched exactly and acked:
+
+| Line | Effect |
+| --- | --- |
+| `{"power":"sleep"}` | Rest: the panel fades to black and stays dark (USB power, payloads and alerts don't wake it). A button press, a touch or `wake` brings it back. |
+| `{"power":"wake"}` | Leaves rest. |
+| `{"power":"off"}` | Acked, then the PMU cuts the power like an 8 s PWR hold. Only PWR turns it back on; plugging USB in with it off doesn't. Boards without a PMU that can do it (`power_hal_shutdown()` weak default) answer `{"err":true}` after the ack. |

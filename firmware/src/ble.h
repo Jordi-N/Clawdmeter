@@ -16,6 +16,9 @@ const char* ble_get_mac_address(void);
 void ble_clear_bonds(void);
 void ble_print_status(void);   // serial `ble`: state, bonds, owner, peers
 void ble_disconnect_all(void); // serial `disconnect`: drop every link
+// false: stop advertising and drop every link (the app is on USB or WiFi);
+// true: advertise again. Idempotent; the pair gesture still clears bonds.
+void ble_set_radio(bool on);
 bool ble_has_data(void);
 // The latest payload, copied for the caller; valid until the next call.
 const char* ble_get_data(void);

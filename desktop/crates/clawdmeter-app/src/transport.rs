@@ -1,20 +1,24 @@
-//! The links the daemon talks to the device over: BLE ([`DeviceLink`]) or
-//! TCP on the local network ([`TcpLink`], fork firmware only). Both carry
-//! the same JSON lines and deliver the same [`DeviceEvent`]s, so the
-//! daemon's link logic doesn't care which one it holds.
+//! The links the daemon talks to the device over: BLE ([`DeviceLink`]), TCP
+//! on the local network ([`TcpLink`]) or the USB serial port ([`UsbLink`]);
+//! the last two need the fork firmware. All carry the same JSON lines and
+//! deliver the same [`DeviceEvent`]s, so the daemon's link logic doesn't care
+//! which one it holds.
 //!
 //! Finding the device on the network: `wifi_host` when set, else the last
 //! address that worked (`wifi-address` in the state dir), else mDNS
 //! (`_clawdmeter._tcp`, TXT `id` = the BLE device key).
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clawdmeter_ble::{line_event, AddressCache, DeviceEvents, DeviceLink, WriteHealth};
-use clawdmeter_core::wifi::{auth_line, parse_device_line, DeviceLine, Secret, Transport, MDNS_SERVICE, PORT};
+use clawdmeter_core::wifi::{
+    auth_line, parse_device_line, DeviceLine, Secret, Transport, HEARTBEAT_LINE, MDNS_SERVICE, PORT,
+};
+use clawdmeter_flash::device::LinkPort;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
@@ -35,6 +39,8 @@ pub enum Link {
     Ble(DeviceLink),
     /// TCP over the local network.
     Wifi(TcpLink),
+    /// The USB serial port.
+    Usb(UsbLink),
 }
 
 impl Link {
@@ -43,6 +49,7 @@ impl Link {
         match self {
             Link::Ble(_) => Transport::Ble,
             Link::Wifi(_) => Transport::Wifi,
+            Link::Usb(_) => Transport::Usb,
         }
     }
 
@@ -51,6 +58,7 @@ impl Link {
         match self {
             Link::Ble(l) => l.write(data).await.map_err(|e| e.to_string()),
             Link::Wifi(l) => l.write(data).await.map_err(|e| e.to_string()),
+            Link::Usb(l) => l.write(data).map_err(|e| e.to_string()),
         }
     }
 
@@ -59,6 +67,7 @@ impl Link {
         match self {
             Link::Ble(l) => l.is_connected().await,
             Link::Wifi(l) => l.is_connected(),
+            Link::Usb(l) => l.is_connected(),
         }
     }
 
@@ -67,6 +76,7 @@ impl Link {
         match self {
             Link::Ble(l) => l.close().await,
             Link::Wifi(l) => l.close().await,
+            Link::Usb(l) => l.close(),
         }
     }
 }
@@ -149,6 +159,137 @@ impl TcpLink {
     /// The device's address.
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+}
+
+/// The board on the USB serial port (fork firmware): JSON lines both ways,
+/// no auth (the cable is the trust). A blocking thread reads the port; the
+/// firmware's own log lines are skipped like any unreadable line.
+pub struct UsbLink {
+    writer: std::sync::Mutex<LinkPort>,
+    port: String,
+    alive: Arc<AtomicBool>,
+    health: WriteHealth,
+}
+
+impl std::fmt::Debug for UsbLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UsbLink").field("port", &self.port).finish()
+    }
+}
+
+/// The firmware's reply to a line it took.
+fn is_ack(line: &str) -> bool {
+    line.trim() == r#"{"ack":true}"#
+}
+
+/// Complete lines from a byte stream; a partial line waits in `pending`.
+fn take_lines(pending: &mut Vec<u8>, data: &[u8]) -> Vec<String> {
+    pending.extend_from_slice(data);
+    let mut out = Vec::new();
+    while let Some(i) = pending.iter().position(|&b| b == b'\n') {
+        let line: Vec<u8> = pending.drain(..=i).collect();
+        out.push(String::from_utf8_lossy(&line).trim().to_owned());
+    }
+    // A runaway log line with no newline: drop it rather than grow forever.
+    if pending.len() > 4096 {
+        pending.clear();
+    }
+    out
+}
+
+impl UsbLink {
+    /// Open `port` and check the firmware speaks the USB link: it must ack a
+    /// keepalive within the handshake time (older firmware ignores the line).
+    pub async fn open(port: String) -> io::Result<(UsbLink, DeviceEvents)> {
+        tokio::task::spawn_blocking(move || UsbLink::open_blocking(port)).await.map_err(io::Error::other)?
+    }
+
+    fn open_blocking(port: String) -> io::Result<(UsbLink, DeviceEvents)> {
+        let (mut reader, mut writer) =
+            clawdmeter_flash::device::open_link(&port).map_err(|e| io::Error::other(e.to_string()))?;
+        // The leading newline ends whatever the port held before.
+        writer.write_all(format!("\n{HEARTBEAT_LINE}\n").as_bytes())?;
+        writer.flush()?;
+        let (tx, events) = mpsc::unbounded_channel();
+        let mut pending = Vec::new();
+        let mut buf = [0u8; 512];
+        let end = Instant::now() + HANDSHAKE_TIMEOUT;
+        let mut acked = false;
+        while !acked && Instant::now() < end {
+            let n = match reader.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+                Err(e) => return Err(e),
+            };
+            for line in take_lines(&mut pending, &buf[..n]) {
+                // What a new host gets before the ack (WiFi status, a refresh
+                // request) is kept for the daemon.
+                if is_ack(&line) {
+                    acked = true;
+                } else if let Some(ev) = line_event(&line) {
+                    let _ = tx.send(ev);
+                }
+            }
+        }
+        if !acked {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the board's firmware doesn't answer on USB (update it)",
+            ));
+        }
+        let alive = Arc::new(AtomicBool::new(true));
+        let up = alive.clone();
+        std::thread::Builder::new().name("clawdmeter-usb".into()).spawn(move || {
+            while up.load(Ordering::Relaxed) {
+                match reader.read(&mut buf) {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        for line in take_lines(&mut pending, &buf[..n]) {
+                            if let Some(ev) = line_event(&line) {
+                                if tx.send(ev).is_err() {
+                                    up.store(false, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+                    Err(_) => break, // unplugged
+                }
+            }
+            up.store(false, Ordering::Relaxed);
+        })?;
+        Ok((UsbLink { writer: std::sync::Mutex::new(writer), port, alive, health: WriteHealth::default() }, events))
+    }
+
+    /// Write one line (the newline is added here). Short and bounded by the
+    /// port's timeout, so it runs inline.
+    pub fn write(&self, data: &[u8]) -> io::Result<()> {
+        let mut line = Vec::with_capacity(data.len() + 1);
+        line.extend_from_slice(data);
+        line.push(b'\n');
+        let r = match self.writer.lock() {
+            Ok(mut w) => w.write_all(&line).and_then(|()| w.flush()),
+            Err(_) => Err(io::Error::other("USB writer poisoned")),
+        };
+        self.health.record(r.is_ok());
+        r
+    }
+
+    /// The port is still there and writes go through.
+    pub fn is_connected(&self) -> bool {
+        self.alive.load(Ordering::Relaxed) && !self.health.is_zombie()
+    }
+
+    /// Let go of the port: the reader stops within one read timeout (100 ms)
+    /// and the port closes once the link is dropped.
+    pub fn close(&self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    /// The serial port's name.
+    pub fn port(&self) -> &str {
+        &self.port
     }
 }
 
@@ -342,6 +483,17 @@ mod tests {
         let err = connect_wifi(None, None, cache, Secret(KEY.into())).await.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn usb_lines_split_across_reads() {
+        let mut pending = Vec::new();
+        assert!(take_lines(&mut pending, b"BLE: adverti").is_empty());
+        assert_eq!(take_lines(&mut pending, b"sing\r\n{\"ack\":true}\n{\"req\""), ["BLE: advertising", r#"{"ack":true}"#]);
+        assert_eq!(take_lines(&mut pending, b":true}\n"), [r#"{"req":true}"#]);
+        assert!(pending.is_empty());
+        assert!(is_ack(r#"{"ack":true}"#) && !is_ack(r#"{"err":true}"#));
+        assert_eq!(line_event(r#"{"key":"space","down":true}"#), Some(DeviceEvent::Key { name: "space".into(), down: true }));
     }
 
     #[test]

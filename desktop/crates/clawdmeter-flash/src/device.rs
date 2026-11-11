@@ -277,6 +277,37 @@ pub fn query_json(
     Ok(None)
 }
 
+/// One handle to a port held open for the app's USB link.
+pub struct LinkPort(Box<dyn serialport::SerialPort>);
+
+impl Read for LinkPort {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for LinkPort {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// Open `port` for the app's USB link: a reader and a writer on the same
+/// port, input cleared, reads timing out after 100 ms. Like [`probe_info`],
+/// opening it doesn't reset the board.
+pub fn open_link(port: &str) -> Result<(LinkPort, LinkPort), DeviceError> {
+    let sp = serialport::new(port, 115_200)
+        .timeout(Duration::from_millis(100))
+        .open()
+        .map_err(|e| DeviceError::from_open(port, e))?;
+    let _ = sp.clear(serialport::ClearBuffer::Input);
+    let reader = sp.try_clone().map_err(|e| DeviceError::from_open(port, e))?;
+    Ok((LinkPort(reader), LinkPort(sp)))
+}
+
 /// The first complete line of `text` that parses as a JSON object with `key`.
 pub fn find_json_with(text: &str, key: &str) -> Option<serde_json::Value> {
     text.split_inclusive('\n').filter(|l| l.ends_with('\n')).find_map(|l| {
