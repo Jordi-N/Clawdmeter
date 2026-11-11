@@ -236,8 +236,7 @@ pub fn parse_device_line(text: &str) -> Option<DeviceLine> {
     if v.get("auth").and_then(Value::as_str) == Some("ok") {
         return Some(DeviceLine::AuthOk);
     }
-    if let (Some(nonce), Some(proof)) =
-        (v.get("nonce").and_then(Value::as_str), v.get("proof").and_then(Value::as_str))
+    if let (Some(nonce), Some(proof)) = (v.get("nonce").and_then(Value::as_str), v.get("proof").and_then(Value::as_str))
     {
         return Some(DeviceLine::Challenge { nonce: nonce.to_owned(), proof: proof.to_owned() });
     }
