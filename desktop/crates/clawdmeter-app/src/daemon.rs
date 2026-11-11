@@ -488,6 +488,12 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     }
                     None
                 }
+                Ok(Attempt::Usb(Ok((l, _)))) if crate::ipc::usb_claimed(&paths, unix_now()) => {
+                    // The window asked for the port while this was opening.
+                    l.close();
+                    log::info!("USB port claimed by the window; letting go");
+                    None
+                }
                 Ok(Attempt::Usb(Ok((l, rx)))) => {
                     log::info!("connected over USB ({})", l.port());
                     usb_retry.connected();

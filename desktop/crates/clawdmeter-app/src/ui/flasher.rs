@@ -138,20 +138,36 @@ pub trait FlashHardware: Send + Sync + 'static {
 }
 
 /// The board on USB, through `clawdmeter_flash::device`. Each use of the
-/// port first claims it from the daemon's USB link (`ipc::claim_usb`).
+/// port first claims it from the daemon's USB link (`ipc::claim_usb`; the
+/// page also holds the claim while it's on screen) and retries for a few
+/// seconds while it's still busy: the daemon may be mid-handshake on it.
 pub struct Usb(pub Paths);
+
+/// Run `open` until the port isn't busy, for up to about 5 s.
+fn until_free<T>(mut open: impl FnMut() -> Result<T, DeviceError>) -> Result<T, DeviceError> {
+    let mut tries = 0;
+    loop {
+        match open() {
+            Err(DeviceError::Busy { .. }) if tries < 10 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            r => return r,
+        }
+    }
+}
 
 impl FlashHardware for Usb {
     fn ports(&self) -> Vec<String> {
         device::list_ports().into_iter().map(|p| p.path).collect()
     }
     fn probe_info(&self, port: &str) -> Option<FirmwareInfo> {
-        crate::ipc::claim_usb(&self.0, 5);
-        device::probe_info(port, Duration::from_millis(1500)).ok().flatten()
+        crate::ipc::claim_usb(&self.0, 15);
+        until_free(|| device::probe_info(port, Duration::from_millis(1500))).ok().flatten()
     }
     fn probe_chip(&self, port: &str) -> Result<ChipInfo, DeviceError> {
-        crate::ipc::claim_usb(&self.0, 10);
-        device::probe_chip(port)
+        crate::ipc::claim_usb(&self.0, 20);
+        until_free(|| device::probe_chip(port))
     }
     fn flash(
         &self,
@@ -162,7 +178,7 @@ impl FlashHardware for Usb {
     ) -> Result<(), DeviceError> {
         // Writing plus the reboot and the check after it.
         crate::ipc::claim_usb(&self.0, 300);
-        let r = device::flash_merged(port, image, board, progress);
+        let r = until_free(|| device::flash_merged(port, image, board, &mut *progress));
         crate::ipc::claim_usb(&self.0, 15);
         r
     }
@@ -174,6 +190,8 @@ pub struct FlasherView {
     hw: Arc<dyn FlashHardware>,
     step: Step,
     mode: FlashMode,
+    /// The USB claim is held (see `tick`).
+    holding_usb: bool,
     /// On screen: only then does it listen on USB.
     active: bool,
     /// The release check has been started (it runs on first show).
@@ -274,6 +292,7 @@ impl FlasherView {
             step: Step::Connect,
             mode: FlashMode::Page,
             active: false,
+            holding_usb: false,
             requested: false,
             shop: false,
             details: false,
@@ -425,6 +444,15 @@ impl FlasherView {
 
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
+        // The daemon keeps off the port while this page is up and not done,
+        // so it never holds the board between two probes.
+        let hold = self.active && self.step != Step::Done;
+        if hold {
+            ipc::hold_usb(&self.paths, 10);
+        } else if self.holding_usb {
+            ipc::release_usb(&self.paths);
+        }
+        self.holding_usb = hold;
         if self.active && self.step == Step::Connect && !self.probing && self.ticks.is_multiple_of(2) {
             if let Some(p) = self.hw.ports().into_iter().next() {
                 self.port = Some(p);

@@ -308,15 +308,25 @@ pub fn usb_claim_file(paths: &Paths) -> PathBuf {
     paths.state_dir.join("usb-claim")
 }
 
-/// Claim the serial port for `secs`, then wait (at most 3 s) until the
-/// daemon has let go of it. Blocking: call it off the UI thread.
-pub fn claim_usb(paths: &Paths, secs: i64) {
+/// Ask the daemon to keep off the serial port for the next `secs` (renewed
+/// while a page needs it). Doesn't wait.
+pub fn hold_usb(paths: &Paths, secs: i64) {
     let until = clawdmeter_core::unix_now() + secs;
     let wrote = fs::create_dir_all(&paths.state_dir).and_then(|()| fs::write(usb_claim_file(paths), until.to_string()));
     if let Err(e) = wrote {
         log::warn!("couldn't claim the USB port: {e}");
-        return;
     }
+}
+
+/// Give the port back to the daemon now.
+pub fn release_usb(paths: &Paths) {
+    let _ = fs::remove_file(usb_claim_file(paths));
+}
+
+/// Claim the serial port for `secs`, then wait (at most 3 s) until the
+/// daemon has let go of it. Blocking: call it off the UI thread.
+pub fn claim_usb(paths: &Paths, secs: i64) {
+    hold_usb(paths, secs);
     let on_usb = || {
         read_status(paths).is_some_and(|s| s.alive(clawdmeter_core::unix_now()) && s.transport == Some(Transport::Usb))
     };
@@ -552,6 +562,8 @@ mod tests {
         claim_usb(&paths, 5);
         assert!(usb_claimed(&paths, now));
         assert!(!usb_claimed(&paths, now + 6));
+        release_usb(&paths);
+        assert!(!usb_claimed(&paths, now), "released early");
         let _ = fs::remove_dir_all(dir);
     }
 
