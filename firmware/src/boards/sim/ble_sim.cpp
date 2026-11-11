@@ -129,6 +129,7 @@ const char* ble_get_mac_address(void) { return "00:51:4D:00:00:01"; }
 void ble_clear_bonds(void) { printf("[sim] pair gesture completed — bonds cleared\n"); }
 void ble_print_status(void) { printf("BLE status: state=%s (sim)\n", connected ? "CONNECTED" : "ADVERTISING"); }
 void ble_disconnect_all(void) { printf("[sim] disconnect\n"); }
+void ble_set_radio(bool on) { printf("[sim] BLE %s\n", on ? "on" : "off"); }
 
 bool ble_has_data(void) { return connected && (pending || inject_n > 0); }
 const char* ble_get_data(void) {

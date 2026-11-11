@@ -36,3 +36,9 @@ void radio_mdns_start(const char* instance, const char* id, unsigned port) {
     printf("[sim] mDNS (not advertised) _clawdmeter._tcp '%s' port %u id=%s\n", instance, port, id);
 }
 void radio_mdns_stop(void) {}
+void radio_random(uint8_t* buf, size_t n) {
+    FILE* f = fopen("/dev/urandom", "rb");
+    const size_t got = f ? fread(buf, 1, n, f) : 0;
+    if (f) fclose(f);
+    for (size_t i = got; i < n; i++) buf[i] = (uint8_t)rand();
+}

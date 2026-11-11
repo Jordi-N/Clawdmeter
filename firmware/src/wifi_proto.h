@@ -9,6 +9,8 @@
 #define WIFI_TCP_PORT    7363
 #define WIFI_KEY_LEN     32      // hex chars
 #define WIFI_LINE_MAX    512     // same as the BLE receive buffer
+#define WIFI_NONCE_LEN   32      // hex chars (16 random bytes)
+#define WIFI_MAC_LEN     64      // hex chars (HMAC-SHA256)
 
 enum WifiCmdKind {
     WIFI_CMD_SET,      // {"wifi":{"ssid","pass","key","en"}}: store creds, then en
@@ -31,9 +33,22 @@ struct WifiCmd {
 // `wifi` key (valid or not) and no `ok`: it must not reach the usage path.
 bool wifi_cmd_parse(const char* json, WifiCmd* out, bool* wifi_only);
 
-// True when `line` is exactly {"auth":"<key>"} for this 32-hex key
-// (case-insensitive hex, compared in constant time). False for an empty key.
-bool wifi_auth_ok(const char* line, const char* key);
+// TCP handshake, mutual and without sending the key (docs/protocol.md):
+//   app    -> {"hello":"<cn>"}                 cn: 32 hex, the app's nonce
+//   device -> {"nonce":"<dn>","proof":"<mac>"}  mac = HMAC(key, "clawd-dev:cn:dn")
+//   app    -> {"auth":"<mac>"}                  mac = HMAC(key, "clawd-app:cn:dn")
+//   device -> {"auth":"ok"}
+// The HMAC key is the 32-hex key's text, lowercased.
+
+void wifi_sha256(const uint8_t* data, size_t n, uint8_t out[32]);
+void wifi_hmac_sha256(const uint8_t* key, size_t key_n, const uint8_t* msg, size_t msg_n, uint8_t out[32]);
+// HMAC(key, "<label>:<cn>:<dn>") as lowercase hex; false for a bad key.
+bool wifi_auth_mac(const char* key, const char* label, const char* cn, const char* dn,
+                   char out[WIFI_MAC_LEN + 1]);
+// {"hello":"<32 hex>"}: copies the nonce lowercased.
+bool wifi_hello_parse(const char* line, char cn[WIFI_NONCE_LEN + 1]);
+// {"auth":"<64 hex>"} matching `want` (lowercase hex), compared in constant time.
+bool wifi_auth_check(const char* line, const char* want);
 
 // Newline framing for a byte stream. Lines longer than WIFI_LINE_MAX-1 are
 // dropped whole; '\r' is stripped; empty lines are skipped.

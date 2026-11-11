@@ -186,7 +186,13 @@ impl EntityInputHandler for SettingsView {
 
     fn unmark_text(&mut self, _: &mut Window, _: &mut Context<Self>) {}
 
-    fn replace_text_in_range(&mut self, _: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn replace_text_in_range(
+        &mut self,
+        _: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(which) = self.focused_wifi_field(window) {
             self.push_wifi_text(which, text, cx);
         }

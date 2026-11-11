@@ -22,7 +22,7 @@ static HELD: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 /// `shift_tab`.
 fn keys_for(name: &str) -> Option<&'static [u16]> {
     match name {
-        "space" => Some(&[0x20]),            // VK_SPACE
+        "space" => Some(&[0x20]),           // VK_SPACE
         "shift_tab" => Some(&[0x10, 0x09]), // VK_SHIFT, VK_TAB
         _ => None,
     }

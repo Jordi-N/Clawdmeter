@@ -1,5 +1,6 @@
 #pragma once
 #include <stddef.h>
+#include <stdint.h>
 #include "wifi_proto.h"
 
 // WiFi (LAN) transport: the same JSON lines as BLE, over TCP, for when the
@@ -34,3 +35,4 @@ void radio_ip(char* buf, size_t cap);
 void radio_off(void);
 void radio_mdns_start(const char* instance, const char* id, unsigned port);
 void radio_mdns_stop(void);
+void radio_random(uint8_t* buf, size_t n);   // hardware RNG (sim: /dev/urandom)

@@ -526,7 +526,7 @@ pub fn line_event(text: &str) -> Option<DeviceEvent> {
         DeviceLine::Dismissed => Some(DeviceEvent::Dismissed),
         DeviceLine::Wifi(s) => Some(DeviceEvent::Wifi(s)),
         DeviceLine::Key { name, down } => Some(DeviceEvent::Key { name, down }),
-        DeviceLine::AuthOk => None,
+        DeviceLine::AuthOk | DeviceLine::Challenge { .. } => None,
     }
 }
 

@@ -9,6 +9,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <string.h>
+#include <esp_random.h>
 
 static bool mdns_up = false;
 
@@ -64,6 +65,11 @@ void radio_mdns_start(const char* instance, const char* id, unsigned port) {
     MDNS.addServiceTxt("clawdmeter", "tcp", "id", id);
     mdns_up = true;
     Serial.printf("WiFi: mDNS %s.local, _clawdmeter._tcp %u id=%s\n", host, port, id);
+}
+
+void radio_random(uint8_t* buf, size_t n) {
+    // True random while the radio is on, which it is whenever TCP serves.
+    esp_fill_random(buf, n);
 }
 
 void radio_mdns_stop(void) {

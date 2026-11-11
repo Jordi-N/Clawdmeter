@@ -3,20 +3,27 @@
 //! device's radio, the lines the device sends back, and which transport to
 //! try next.
 //!
-//! The device is provisioned over BLE with a shared 32-hex key; it then
-//! advertises `_clawdmeter._tcp` over mDNS and takes the same JSON lines
-//! over TCP after a `{"auth":"<key>"}` handshake.
+//! The device is provisioned over BLE (or USB) with a shared 32-hex key; it
+//! then advertises `_clawdmeter._tcp` over mDNS and takes the same JSON lines
+//! over TCP after a mutual HMAC handshake: each side proves it knows the key
+//! without sending it ([`auth_mac`]).
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 /// The device's TCP port.
 pub const PORT: u16 = 7363;
 /// The mDNS service type the device advertises.
 pub const MDNS_SERVICE: &str = "_clawdmeter._tcp.local.";
 /// The keys these lines add to the firmware's JSON parser, on top of the
-/// usage payload's (`auth` from the TCP handshake, `wifi` from provisioning).
-pub const TRANSPORT_KEYS: [&str; 2] = ["auth", "wifi"];
+/// usage payload's (`hello` and `auth` from the TCP handshake, `wifi` from
+/// provisioning).
+pub const TRANSPORT_KEYS: [&str; 3] = ["auth", "hello", "wifi"];
+/// The device's half of the handshake MAC.
+pub const DEVICE_LABEL: &str = "clawd-dev";
+/// The app's half.
+pub const APP_LABEL: &str = "clawd-app";
 
 /// A password or key: kept out of `Debug` output, so it never reaches a log.
 #[derive(Clone, PartialEq, Eq, Default)]
@@ -144,9 +151,39 @@ impl Power {
     }
 }
 
-/// The TCP handshake's first line.
-pub fn auth_line(key: &Secret) -> String {
-    json!({"auth": key.0}).to_string()
+/// HMAC-SHA256 (RFC 2104).
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let pad = |b: u8| k.map(|x| x ^ b);
+    let inner = Sha256::new().chain_update(pad(0x36)).chain_update(msg).finalize();
+    Sha256::new().chain_update(pad(0x5c)).chain_update(inner).finalize().into()
+}
+
+/// The handshake MAC: HMAC(key, "<label>:<app nonce>:<device nonce>") as
+/// lowercase hex, the key being its 32-hex text lowercased.
+pub fn auth_mac(key: &Secret, label: &str, app_nonce: &str, device_nonce: &str) -> String {
+    let msg = format!("{label}:{app_nonce}:{device_nonce}");
+    hmac_sha256(key.0.to_ascii_lowercase().as_bytes(), msg.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Equal strings, compared without an early exit.
+pub fn same_secret(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+}
+
+/// The TCP handshake's first line: the app's nonce.
+pub fn hello_line(app_nonce: &str) -> String {
+    json!({"hello": app_nonce}).to_string()
+}
+
+/// The app's proof, answering the device's challenge.
+pub fn auth_line(mac: &str) -> String {
+    json!({"auth": mac}).to_string()
 }
 
 /// What one line from the device (a BLE TX notification or a TCP line) means.
@@ -158,6 +195,14 @@ pub enum DeviceLine {
     Dismissed,
     /// `{"auth":"ok"}`: the TCP handshake passed.
     AuthOk,
+    /// `{"nonce":"<32 hex>","proof":"<64 hex>"}`: the device's answer to the
+    /// app's hello.
+    Challenge {
+        /// The device's nonce.
+        nonce: String,
+        /// HMAC(key, "clawd-dev:<app nonce>:<nonce>").
+        proof: String,
+    },
     /// Its WiFi state (alone, or in the ack of a `wifi` line).
     Wifi(WifiStatus),
     /// `{"key":"space","down":true}`: a button the app types on this
@@ -190,6 +235,11 @@ pub fn parse_device_line(text: &str) -> Option<DeviceLine> {
     }
     if v.get("auth").and_then(Value::as_str) == Some("ok") {
         return Some(DeviceLine::AuthOk);
+    }
+    if let (Some(nonce), Some(proof)) =
+        (v.get("nonce").and_then(Value::as_str), v.get("proof").and_then(Value::as_str))
+    {
+        return Some(DeviceLine::Challenge { nonce: nonce.to_owned(), proof: proof.to_owned() });
     }
     if let Some(name) = v.get("key").and_then(Value::as_str) {
         let down = v.get("down").and_then(Value::as_bool)?;
@@ -243,7 +293,8 @@ mod tests {
         );
         assert_eq!(enable_line(false), r#"{"wifi":{"en":false}}"#);
         assert_eq!(enable_line(true), r#"{"wifi":{"en":true}}"#);
-        assert_eq!(auth_line(&key), r#"{"auth":"0123456789abcdef0123456789ABCDEF"}"#);
+        assert_eq!(hello_line("00ff"), r#"{"hello":"00ff"}"#);
+        assert_eq!(auth_line("ab12"), r#"{"auth":"ab12"}"#);
         assert!(is_key(&key.0));
         assert!(!is_key("0123"));
         assert!(!is_key("g123456789abcdef0123456789abcdef"));
@@ -279,6 +330,36 @@ mod tests {
         assert_eq!(
             parse_device_line(r#"{"wifi":{"st":"off"}}"#),
             Some(DeviceLine::Wifi(WifiStatus { st: "off".into(), ..Default::default() }))
+        );
+    }
+
+    #[test]
+    fn handshake_macs() {
+        // RFC 4231 cases 2 and 6.
+        let hex = |b: [u8; 32]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        assert_eq!(
+            hex(hmac_sha256(b"Jefe", b"what do ya want for nothing?")),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        assert_eq!(
+            hex(hmac_sha256(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First")),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+        // Same vector as the firmware's test_wifi `test_auth`.
+        let key = Secret("0123456789abcdef0123456789ABCDEF".into());
+        let (cn, dn) = ("00112233445566778899aabbccddeeff", "ffeeddccbbaa99887766554433221100");
+        assert_eq!(
+            auth_mac(&key, DEVICE_LABEL, cn, dn),
+            "b25373f2a04516f222890f7c51695e305c9441d0aa78afae3941f3eda63b047b"
+        );
+        assert_eq!(
+            auth_mac(&key, APP_LABEL, cn, dn),
+            "0270cf6e163ea087baac72102c05606e60bed122d519e0e18e721119ece1a5a4"
+        );
+        assert!(same_secret("abc", "abc") && !same_secret("abc", "abd") && !same_secret("abc", "ab"));
+        assert_eq!(
+            parse_device_line(r#"{"nonce":"ff","proof":"aa"}"#),
+            Some(DeviceLine::Challenge { nonce: "ff".into(), proof: "aa".into() })
         );
     }
 

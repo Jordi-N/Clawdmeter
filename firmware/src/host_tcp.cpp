@@ -25,7 +25,10 @@ struct TcpPeer {
 
 static int listen_fd = -1;
 static TcpPeer active  = { -1, {}, 0 };   // authenticated
-static TcpPeer pending = { -1, {}, 0 };   // connected, waiting for {"auth":...}
+static TcpPeer pending = { -1, {}, 0 };   // connected, in the handshake
+// The pending client's handshake: its auth MAC, once the hello is answered
+// (empty: waiting for the hello).
+static char want_auth[WIFI_MAC_LEN + 1];
 static const char* tick_key = nullptr;
 static void (*tick_on_line)(const char*) = nullptr;
 static bool just_promoted = false;   // pending -> active inside this read
@@ -34,6 +37,7 @@ static void close_client(TcpPeer* c) {
     if (c->fd >= 0) close(c->fd);
     c->fd = -1;
     linebuf_reset(&c->lb);
+    if (c == &pending) want_auth[0] = '\0';
 }
 
 static void set_nonblocking(int fd) {
@@ -94,13 +98,41 @@ void tcp_host_send(const char* line) {
     }
 }
 
-// First line of a pending client: the auth. Success replaces the old client.
+static void hex(char* out, const uint8_t* b, size_t n) {
+    static const char H[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) { out[2 * i] = H[b[i] >> 4]; out[2 * i + 1] = H[b[i] & 15]; }
+    out[2 * n] = '\0';
+}
+
+// The hello: answer with our nonce and the proof that we know the key.
+static bool answer_hello(const char* line) {
+    char cn[WIFI_NONCE_LEN + 1], dn[WIFI_NONCE_LEN + 1], proof[WIFI_MAC_LEN + 1];
+    if (!wifi_hello_parse(line, cn)) return false;
+    uint8_t r[WIFI_NONCE_LEN / 2];
+    radio_random(r, sizeof(r));
+    hex(dn, r, sizeof(r));
+    if (!wifi_auth_mac(tick_key, "clawd-dev", cn, dn, proof)) return false;
+    if (!wifi_auth_mac(tick_key, "clawd-app", cn, dn, want_auth)) return false;
+    char reply[160];
+    snprintf(reply, sizeof(reply), "{\"nonce\":\"%s\",\"proof\":\"%s\"}", dn, proof);
+    return write_line(pending.fd, reply);
+}
+
+// A pending client's lines: the hello, then the auth. Success replaces the
+// old client.
 static bool on_pending_line(const char* line, void*) {
-    if (!wifi_auth_ok(line, tick_key) || !write_line(pending.fd, "{\"auth\":\"ok\"}")) {
+    if (!want_auth[0]) {
+        if (answer_hello(line)) return true;
+        Serial.println("WiFi: TCP hello refused, closing");
+        close_client(&pending);
+        return false;
+    }
+    if (!wifi_auth_check(line, want_auth) || !write_line(pending.fd, "{\"auth\":\"ok\"}")) {
         Serial.println("WiFi: TCP auth failed, closing");
         close_client(&pending);
         return false;
     }
+    want_auth[0] = '\0';
     close_client(&active);
     active = pending;          // the rest of this read is already its data
     just_promoted = true;

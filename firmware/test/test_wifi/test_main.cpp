@@ -65,14 +65,61 @@ static void test_routing(void) {
     TEST_ASSERT_FALSE(only);
 }
 
+static void hexs(char* out, const uint8_t* b, size_t n) {
+    static const char H[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) { out[2 * i] = H[b[i] >> 4]; out[2 * i + 1] = H[b[i] & 15]; }
+    out[2 * n] = '\0';
+}
+
+static void test_sha256_hmac(void) {
+    uint8_t d[32];
+    char h[65];
+    wifi_sha256((const uint8_t*)"abc", 3, d);
+    hexs(h, d, 32);
+    TEST_ASSERT_EQUAL_STRING("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", h);
+    // 56 bytes: the length spills into a second padding block.
+    uint8_t a56[56];
+    memset(a56, 'a', sizeof(a56));
+    wifi_sha256(a56, sizeof(a56), d);
+    hexs(h, d, 32);
+    TEST_ASSERT_EQUAL_STRING("b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a", h);
+    // RFC 4231 cases 2 and 6 (a key longer than a block is hashed first).
+    const char* msg2 = "what do ya want for nothing?";
+    wifi_hmac_sha256((const uint8_t*)"Jefe", 4, (const uint8_t*)msg2, strlen(msg2), d);
+    hexs(h, d, 32);
+    TEST_ASSERT_EQUAL_STRING("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", h);
+    uint8_t k6[131];
+    memset(k6, 0xaa, sizeof(k6));
+    const char* msg6 = "Test Using Larger Than Block-Size Key - Hash Key First";
+    wifi_hmac_sha256(k6, sizeof(k6), (const uint8_t*)msg6, strlen(msg6), d);
+    hexs(h, d, 32);
+    TEST_ASSERT_EQUAL_STRING("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54", h);
+}
+
 static void test_auth(void) {
-    TEST_ASSERT_TRUE(wifi_auth_ok("{\"auth\":\"0123456789abcdef0123456789abcdef\"}", KEY));
-    TEST_ASSERT_TRUE(wifi_auth_ok("{\"auth\":\"0123456789ABCDEF0123456789abcdef\"}", KEY));
-    TEST_ASSERT_FALSE(wifi_auth_ok("{\"auth\":\"0123456789abcdef0123456789abcdee\"}", KEY));
-    TEST_ASSERT_FALSE(wifi_auth_ok("{\"auth\":\"\"}", KEY));
-    TEST_ASSERT_FALSE(wifi_auth_ok("{\"s\":1}", KEY));
-    TEST_ASSERT_FALSE(wifi_auth_ok("garbage", KEY));
-    TEST_ASSERT_FALSE(wifi_auth_ok("{\"auth\":\"0123456789abcdef0123456789abcdef\"}", ""));
+    // Same vector as the app's `handshake_macs` test (clawdmeter-core wifi.rs).
+    const char* cn = "00112233445566778899aabbccddeeff";
+    const char* dn = "ffeeddccbbaa99887766554433221100";
+    char mac[WIFI_MAC_LEN + 1];
+    TEST_ASSERT_TRUE(wifi_auth_mac(KEY, "clawd-dev", cn, dn, mac));
+    TEST_ASSERT_EQUAL_STRING("b25373f2a04516f222890f7c51695e305c9441d0aa78afae3941f3eda63b047b", mac);
+    TEST_ASSERT_TRUE(wifi_auth_mac(KEY, "clawd-app", cn, dn, mac));
+    TEST_ASSERT_EQUAL_STRING("0270cf6e163ea087baac72102c05606e60bed122d519e0e18e721119ece1a5a4", mac);
+    TEST_ASSERT_FALSE(wifi_auth_mac("", "clawd-app", cn, dn, mac));
+
+    char got[WIFI_NONCE_LEN + 1];
+    TEST_ASSERT_TRUE(wifi_hello_parse("{\"hello\":\"00112233445566778899AABBCCDDEEFF\"}", got));
+    TEST_ASSERT_EQUAL_STRING(cn, got);
+    TEST_ASSERT_FALSE(wifi_hello_parse("{\"hello\":\"0011\"}", got));
+    TEST_ASSERT_FALSE(wifi_hello_parse("{\"auth\":\"0123456789abcdef0123456789abcdef\"}", got));
+
+    char line[96];
+    snprintf(line, sizeof(line), "{\"auth\":\"%s\"}", mac);
+    TEST_ASSERT_TRUE(wifi_auth_check(line, mac));
+    TEST_ASSERT_FALSE(wifi_auth_check(line, "0270cf6e163ea087baac72102c05606e60bed122d519e0e18e721119ece1a5a5"));
+    // The old handshake (the key itself) no longer passes.
+    TEST_ASSERT_FALSE(wifi_auth_check("{\"auth\":\"0123456789abcdef0123456789abcdef\"}", mac));
+    TEST_ASSERT_FALSE(wifi_auth_check("garbage", mac));
 }
 
 struct Lines { char got[4][WIFI_LINE_MAX]; int n; int stop_after; };
@@ -132,6 +179,7 @@ int main(int, char**) {
     RUN_TEST(test_enable_forget);
     RUN_TEST(test_invalid);
     RUN_TEST(test_routing);
+    RUN_TEST(test_sha256_hmac);
     RUN_TEST(test_auth);
     RUN_TEST(test_framing);
     RUN_TEST(test_status_backoff);

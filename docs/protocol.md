@@ -89,8 +89,14 @@ device-key form (uppercase, colons: `44:BD:8D:77:AF:11`).
 Framing is newline-delimited UTF-8 JSON in both directions, one object per
 line, at most 511 bytes (longer lines are dropped).
 
-1. The client's first line must be `{"auth":"<key>"}` within 3 s, or the
-   device closes the socket. The device answers `{"auth":"ok"}`.
+1. Mutual handshake, finished within 3 s or the device closes the socket.
+   The key never goes on the wire; `HMAC` is HMAC-SHA256 keyed with the
+   32-hex key's text lowercased, written as 64 lowercase hex:
+   - app → `{"hello":"<cn>"}`, `cn` 16 random bytes as 32 hex;
+   - device → `{"nonce":"<dn>","proof":"<HMAC(key, "clawd-dev:cn:dn")>"}`;
+     the app checks the proof and drops a device that can't make it;
+   - app → `{"auth":"<HMAC(key, "clawd-app:cn:dn")>"}`;
+   - device → `{"auth":"ok"}`, or it closes the socket.
 2. After that every client line is handled exactly like a BLE RX write
    (usage payloads, `ag`, `wifi`): the device answers `{"ack":true}` or
    `{"err":true}` per line.

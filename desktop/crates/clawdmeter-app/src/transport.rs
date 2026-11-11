@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 
 use clawdmeter_ble::{line_event, AddressCache, DeviceEvents, DeviceLink, WriteHealth};
 use clawdmeter_core::wifi::{
-    auth_line, parse_device_line, DeviceLine, Secret, Transport, HEARTBEAT_LINE, MDNS_SERVICE, PORT,
+    auth_line, auth_mac, hello_line, is_key, parse_device_line, same_secret, DeviceLine, Secret, Transport, APP_LABEL,
+    DEVICE_LABEL, HEARTBEAT_LINE, MDNS_SERVICE, PORT,
 };
 use clawdmeter_flash::device::LinkPort;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -100,20 +101,35 @@ fn timed_out(what: &str) -> io::Error {
 }
 
 impl TcpLink {
-    /// Connect and authenticate with `key`. The device's lines after
-    /// `{"auth":"ok"}` arrive as events until it closes the connection.
+    /// Connect and run the mutual handshake with `key`: the device proves it
+    /// knows the key before the app answers, and the key never goes on the
+    /// wire. The device's lines after `{"auth":"ok"}` arrive as events until
+    /// it closes the connection.
     pub async fn open(addr: SocketAddr, key: &Secret) -> io::Result<(TcpLink, DeviceEvents)> {
+        let denied = |why: &str| io::Error::new(io::ErrorKind::PermissionDenied, why.to_owned());
         let stream = tokio::time::timeout(HANDSHAKE_TIMEOUT, TcpStream::connect(addr))
             .await
             .map_err(|_| timed_out("connect"))??;
         stream.set_nodelay(true)?;
         let (read, mut write) = stream.into_split();
-        write.write_all(format!("{}\n", auth_line(key)).as_bytes()).await?;
+        let app_nonce = new_key()?.0;
+        write.write_all(format!("{}\n", hello_line(&app_nonce)).as_bytes()).await?;
         let mut lines = BufReader::new(read).lines();
+        let reply =
+            tokio::time::timeout(HANDSHAKE_TIMEOUT, lines.next_line()).await.map_err(|_| timed_out("hello"))??;
+        let Some(DeviceLine::Challenge { nonce, proof }) = reply.as_deref().and_then(parse_device_line) else {
+            return Err(denied("the device didn't answer the handshake (update its firmware)"));
+        };
+        let want = auth_mac(key, DEVICE_LABEL, &app_nonce, &nonce);
+        if !is_key(&nonce) || !same_secret(&proof.to_ascii_lowercase(), &want) {
+            return Err(denied("the device doesn't know the key: not trusting it"));
+        }
+        let mac = auth_mac(key, APP_LABEL, &app_nonce, &nonce);
+        write.write_all(format!("{}\n", auth_line(&mac)).as_bytes()).await?;
         let reply =
             tokio::time::timeout(HANDSHAKE_TIMEOUT, lines.next_line()).await.map_err(|_| timed_out("auth"))??;
         if reply.as_deref().and_then(parse_device_line) != Some(DeviceLine::AuthOk) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "the device refused the key"));
+            return Err(denied("the device refused the key"));
         }
         let (tx, events) = mpsc::unbounded_channel();
         let alive = Arc::new(AtomicBool::new(true));
@@ -396,9 +412,26 @@ mod tests {
 
     const KEY: &str = "0123456789abcdef0123456789abcdef";
 
-    /// A device on 127.0.0.1: checks the auth line (case-insensitively, like
-    /// the firmware), asks for data, reports its WiFi, then hands every line
-    /// it gets to the test.
+    /// The firmware's side of the handshake with `key`; false when the app
+    /// fails it (the firmware then just closes).
+    async fn device_handshake(
+        lines: &mut tokio::io::Lines<BufReader<tokio::net::tcp::OwnedReadHalf>>,
+        w: &mut OwnedWriteHalf,
+        key: &str,
+    ) -> bool {
+        let Ok(Some(hello)) = lines.next_line().await else { return false };
+        let v: serde_json::Value = serde_json::from_str(&hello).unwrap();
+        let cn = v["hello"].as_str().unwrap().to_owned();
+        let dn = "ffeeddccbbaa99887766554433221100";
+        let key = Secret(key.into());
+        let proof = auth_mac(&key, DEVICE_LABEL, &cn, dn);
+        w.write_all(format!("{{\"nonce\":\"{dn}\",\"proof\":\"{proof}\"}}\n").as_bytes()).await.unwrap();
+        let Ok(Some(auth)) = lines.next_line().await else { return false };
+        auth == auth_line(&auth_mac(&key, APP_LABEL, &cn, dn))
+    }
+
+    /// A device on 127.0.0.1: runs the handshake, asks for data, reports its
+    /// WiFi, then hands every line it gets to the test.
     async fn fake_device() -> (SocketAddr, mpsc::UnboundedReceiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -409,9 +442,8 @@ mod tests {
                 tokio::spawn(async move {
                     let (r, mut w) = sock.into_split();
                     let mut lines = BufReader::new(r).lines();
-                    let Ok(Some(first)) = lines.next_line().await else { return };
-                    if first.to_ascii_lowercase() != format!(r#"{{"auth":"{KEY}"}}"#) {
-                        return; // the firmware just closes
+                    if !device_handshake(&mut lines, &mut w, KEY).await {
+                        return;
                     }
                     w.write_all(b"{\"auth\":\"ok\"}\n{\"req\":true}\n").await.unwrap();
                     w.write_all(b"{\"wifi\":{\"st\":\"ok\",\"ip\":\"127.0.0.1\",\"ssid\":\"Casa\"}}\n").await.unwrap();
@@ -456,14 +488,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_by_the_device() {
+    async fn an_impostor_is_not_trusted() {
+        // Something on the network that just says yes, without the key.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 64];
+            let mut buf = [0u8; 128];
             let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
-            sock.write_all(b"{\"auth\":\"ok\"}\n").await.unwrap();
+            let hello = String::from_utf8_lossy(&buf);
+            assert!(!hello.contains(KEY), "the key never goes on the wire");
+            sock.write_all(b"{\"auth\":\"ok\"}\n{\"key\":\"space\",\"down\":true}\n").await.unwrap();
+            let fake = format!("{{\"nonce\":\"{}\",\"proof\":\"{}\"}}\n", "a".repeat(32), "b".repeat(64));
+            let _ = sock.write_all(fake.as_bytes()).await;
+        });
+        let err = TcpLink::open(addr, &Secret(KEY.into())).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn closed_by_the_device() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let (r, mut w) = sock.into_split();
+            let mut lines = BufReader::new(r).lines();
+            assert!(device_handshake(&mut lines, &mut w, KEY).await);
+            w.write_all(b"{\"auth\":\"ok\"}\n").await.unwrap();
             // and hangs up
         });
         let (link, mut events) = TcpLink::open(addr, &Secret(KEY.into())).await.unwrap();
@@ -489,11 +541,17 @@ mod tests {
     fn usb_lines_split_across_reads() {
         let mut pending = Vec::new();
         assert!(take_lines(&mut pending, b"BLE: adverti").is_empty());
-        assert_eq!(take_lines(&mut pending, b"sing\r\n{\"ack\":true}\n{\"req\""), ["BLE: advertising", r#"{"ack":true}"#]);
+        assert_eq!(
+            take_lines(&mut pending, b"sing\r\n{\"ack\":true}\n{\"req\""),
+            ["BLE: advertising", r#"{"ack":true}"#]
+        );
         assert_eq!(take_lines(&mut pending, b":true}\n"), [r#"{"req":true}"#]);
         assert!(pending.is_empty());
         assert!(is_ack(r#"{"ack":true}"#) && !is_ack(r#"{"err":true}"#));
-        assert_eq!(line_event(r#"{"key":"space","down":true}"#), Some(DeviceEvent::Key { name: "space".into(), down: true }));
+        assert_eq!(
+            line_event(r#"{"key":"space","down":true}"#),
+            Some(DeviceEvent::Key { name: "space".into(), down: true })
+        );
     }
 
     #[test]

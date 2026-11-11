@@ -313,8 +313,7 @@ pub fn claim_usb(paths: &Paths, secs: i64) {
         return;
     }
     let on_usb = || {
-        read_status(paths)
-            .is_some_and(|s| s.alive(clawdmeter_core::unix_now()) && s.transport == Some(Transport::Usb))
+        read_status(paths).is_some_and(|s| s.alive(clawdmeter_core::unix_now()) && s.transport == Some(Transport::Usb))
     };
     if !on_usb() {
         return;
