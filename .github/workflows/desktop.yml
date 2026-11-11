@@ -46,14 +46,14 @@ jobs:
 
   core-tests:
     # The pure-logic crate is where per-OS path/config/time handling lives;
-    # running it on macOS and Windows is cheap. The GUI/BLE/flash crates are
-    # covered by the release build on each OS.
+    # running it on Windows is cheap. The GUI/BLE/flash crates are covered by
+    # the release build. This fork ships Windows and Linux only (no macOS).
     name: clawdmeter-core tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [windows-latest]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: rustup toolchain install
