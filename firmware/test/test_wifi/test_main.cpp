@@ -2,6 +2,7 @@
 // framing, the status object and the reconnect backoff.
 //   pio test -d firmware -e native -f test_wifi
 #include <unity.h>
+#include <stdio.h>
 #include <string.h>
 #include "wifi_proto.h"
 

@@ -153,10 +153,10 @@ bool wifi_auth_mac(const char* key, const char* label, const char* cn, const cha
     if (n <= 0 || n >= (int)sizeof(msg)) return false;
     uint8_t mac[32];
     wifi_hmac_sha256((const uint8_t*)k, WIFI_KEY_LEN, (const uint8_t*)msg, (size_t)n, mac);
-    static const char HEX[] = "0123456789abcdef";
+    static const char HEX_DIGITS[] = "0123456789abcdef";
     for (int i = 0; i < 32; i++) {
-        out[2 * i] = HEX[mac[i] >> 4];
-        out[2 * i + 1] = HEX[mac[i] & 15];
+        out[2 * i] = HEX_DIGITS[mac[i] >> 4];
+        out[2 * i + 1] = HEX_DIGITS[mac[i] & 15];
     }
     out[WIFI_MAC_LEN] = '\0';
     return true;
