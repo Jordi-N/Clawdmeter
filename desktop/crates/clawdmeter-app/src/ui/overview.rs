@@ -8,7 +8,7 @@ use super::theme::{Theme, FONT_BODY, FONT_DISPLAY, R_M, R_PILL};
 use super::widgets::{
     button, clawd, dot, field, icon_button, notice, toggle, tone_color, usage_tone, ButtonKind, Tone,
 };
-use super::{command, live_status, not_running_text, Navigate, REFRESH};
+use super::{command, live_status, not_running_text, run_blocking, Navigate, REFRESH};
 use crate::art::TrayState;
 use crate::ipc::{AppCommand, StatusSnapshot};
 use crate::{ago, tilde, Page};
@@ -21,6 +21,8 @@ pub struct OverviewView {
     refreshing: Option<i64>,
     /// `desktop_chime` in the config.
     desktop_chime: bool,
+    /// The app update: downloading, or what went wrong.
+    app_update: Option<(bool, String)>,
 }
 
 impl EventEmitter<Navigate> for OverviewView {}
@@ -35,7 +37,7 @@ impl OverviewView {
             }
         })
         .detach();
-        let mut v = OverviewView { paths, snap: None, refreshing: None, desktop_chime: false };
+        let mut v = OverviewView { paths, snap: None, refreshing: None, desktop_chime: false, app_update: None };
         v.reload(clawdmeter_core::unix_now());
         v
     }
@@ -68,6 +70,22 @@ impl OverviewView {
         if self.snap.is_some() || before.is_some() {
             cx.notify();
         }
+    }
+
+    /// Download the new app and hand over to its installer: the app quits,
+    /// the installer replaces it and starts it again.
+    fn update_app(&mut self, cx: &mut Context<Self>) {
+        self.app_update = Some((true, String::new()));
+        let paths = self.paths.clone();
+        run_blocking(cx, move || crate::self_update::install(&paths), |v, r, cx| match r {
+            Ok(tag) => {
+                log::info!("updating the app to {tag}; quitting");
+                command(&v.paths, AppCommand::Quit);
+                cx.quit();
+            }
+            Err(e) => v.app_update = Some((false, e)),
+        });
+        cx.notify();
     }
 
     /// New firmware is out for the connected device.
@@ -300,6 +318,23 @@ impl Render for OverviewView {
                 .child(meter(&t, "Sesión", s.session_pct, reset_text(s.session_resets_at, now, "Sin empezar")))
                 .child(meter(&t, "Semana", s.week_pct, reset_text(s.week_resets_at, now, "---"))),
         );
+        if let Some(v) = s.app_update() {
+            let v = v.trim_start_matches('v').to_owned();
+            let busy = self.app_update.as_ref().is_some_and(|(b, _)| *b);
+            let mut n = notice(&t, Tone::Accent, format!("Hay una versión nueva de Clawdmeter: v{v}."))
+                .child(div().flex().pl(px(18.)).child(button(
+                    &t,
+                    "app-update",
+                    if busy { "Descargando…" } else { "Actualizar la app" },
+                    ButtonKind::Primary,
+                    !busy,
+                    cx.listener(|v, _, _, cx| v.update_app(cx)),
+                )));
+            if let Some((false, err)) = &self.app_update {
+                n = n.child(div().pl(px(18.)).child(SharedString::from(err.clone())));
+            }
+            page = page.child(n);
+        }
         if let Some(v) = s.update_available() {
             let v = v.trim_start_matches('v').to_owned();
             page = page.child(

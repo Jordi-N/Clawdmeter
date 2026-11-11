@@ -807,8 +807,8 @@ impl SettingsView {
         let on = self.settings.update_check;
         pane = pane.child(field(
             t,
-            "Buscar actualizaciones de firmware",
-            "Consulta GitHub a diario. Las actualizaciones aparecen aquí y en la bandeja.",
+            "Buscar actualizaciones",
+            "Consulta GitHub a diario. Las de la app y el firmware aparecen en Resumen y en la bandeja.",
             toggle(t, "update-check", on, true, move |_, _, cx| {
                 let _ = me.update(cx, |v, cx| {
                     v.save(|s, _| s.update_check = !on);

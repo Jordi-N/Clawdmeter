@@ -273,6 +273,44 @@ pub fn fetch_image(
     Ok(data)
 }
 
+/// The release's checksum list.
+pub const SUMS_ASSET: &str = "SHA256SUMS";
+
+/// The Windows installer asset of release `tag` (`v2.5.0`).
+pub fn msi_asset(tag: &str) -> String {
+    format!("clawdmeter-{tag}-windows-x86_64.msi")
+}
+
+/// The hash `SHA256SUMS` (`<hex>  <name>` lines) lists for `name`.
+pub fn sum_for(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|l| {
+        let mut it = l.split_whitespace();
+        let (hash, file) = (it.next()?, it.next()?);
+        (file.trim_start_matches('*') == name).then(|| hash.to_ascii_lowercase())
+    })
+}
+
+/// Download `release`'s Windows installer into `cache_dir`, checked against
+/// the release's `SHA256SUMS`, and return its path.
+pub fn fetch_installer(release: &Release, cache_dir: &Path) -> Result<PathBuf, ReleaseError> {
+    let name = msi_asset(&release.tag);
+    let url = release.assets.get(&name).ok_or_else(|| ReleaseError::MissingAsset(name.clone()))?;
+    let sums_url = release.assets.get(SUMS_ASSET).ok_or_else(|| ReleaseError::MissingAsset(SUMS_ASSET.into()))?;
+    let expected = sum_for(&get_string(sums_url)?, &name)
+        .ok_or_else(|| ReleaseError::MissingAsset(format!("{name} in {SUMS_ASSET}")))?;
+    let mut data = Vec::new();
+    let read = get(url)?.into_body().into_reader().read_to_end(&mut data);
+    read.map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))?;
+    let actual = sha256_hex(&data);
+    if actual != expected {
+        return Err(ReleaseError::HashMismatch { file: name, expected, actual });
+    }
+    fs::create_dir_all(cache_dir)?;
+    let path = cache_dir.join(&name);
+    fs::write(&path, &data)?;
+    Ok(path)
+}
+
 /// Remembers the last update check in `<cache>/last-update-check`.
 #[derive(Debug, Clone)]
 pub struct UpdateCheck {
@@ -307,6 +345,15 @@ impl UpdateCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installer_sums() {
+        let sums = "ab12  clawdmeter-v2.5.0-windows-x86_64.msi\nCD34 *clawdmeter_2.5.0_amd64.deb\n";
+        assert_eq!(msi_asset("v2.5.0"), "clawdmeter-v2.5.0-windows-x86_64.msi");
+        assert_eq!(sum_for(sums, &msi_asset("v2.5.0")).as_deref(), Some("ab12"));
+        assert_eq!(sum_for(sums, "clawdmeter_2.5.0_amd64.deb").as_deref(), Some("cd34"));
+        assert_eq!(sum_for(sums, "other.zip"), None);
+    }
 
     const API: &str = r#"{"tag_name":"v1.9.0","assets":[
       {"name":"manifest.json","browser_download_url":"https://x/manifest.json"},

@@ -251,6 +251,11 @@ impl StatusSnapshot {
         }
     }
 
+    /// A newer release of the app itself, from the same daily check.
+    pub fn app_update(&self) -> Option<&str> {
+        self.latest_firmware.as_deref().filter(|v| crate::self_update::offered(v))
+    }
+
     /// An update is available for the device.
     pub fn update_available(&self) -> Option<&str> {
         let latest = self.latest_firmware.as_deref()?;
@@ -702,5 +707,15 @@ mod tests {
         assert_eq!(s.update_available(), None);
         s.device_firmware = Some("dev".into());
         assert_eq!(s.update_available(), None, "a local build is not offered a release");
+    }
+
+    #[test]
+    fn app_update_when_the_release_is_newer_than_the_app() {
+        // Tests build without CLAWDMETER_VERSION: the app is the crate version.
+        let s = StatusSnapshot { latest_firmware: Some("v999.0.0".into()), ..Default::default() };
+        assert_eq!(s.app_update(), Some("v999.0.0"));
+        let s = StatusSnapshot { latest_firmware: Some("v0.0.1".into()), ..Default::default() };
+        assert_eq!(s.app_update(), None);
+        assert_eq!(StatusSnapshot::default().app_update(), None);
     }
 }
