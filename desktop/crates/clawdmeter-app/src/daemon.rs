@@ -336,11 +336,11 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 Ok(Command::ProvisionWifi { ssid, pass }) => {
                     // Fresh: the key may have been written since the last re-read.
                     let s = Settings::load(&paths).unwrap_or_else(|_| engine.settings().clone());
-                    // Any link: over WiFi the device takes the new network and
-                    // reconnects to it.
+                    // USB or Bluetooth only: the TCP link is authenticated but not
+                    // encrypted, and this line carries the password and the key.
                     let sent = match &link {
-                        Some(l) => provision(&paths, l, &s, &ssid, &pass).await,
-                        None => Err("Conecta el aparato (USB, WiFi o Bluetooth) para enviarle la red.".into()),
+                        Some(l @ (Link::Ble(_) | Link::Usb(_))) => provision(&paths, l, &s, &ssid, &pass).await,
+                        _ => Err("Conecta el aparato por USB o Bluetooth para enviarle la red.".into()),
                     };
                     wifi.send = Some(match sent {
                         Ok(()) => {

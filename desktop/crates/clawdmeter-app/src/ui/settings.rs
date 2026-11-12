@@ -1100,7 +1100,8 @@ impl SettingsView {
             pass_box,
         ));
         let via = snap.filter(|s| s.link == "connected").and_then(|s| s.transport);
-        let can_send = via.is_some();
+        // Not over WiFi: that link isn't encrypted and the line carries the password.
+        let can_send = matches!(via, Some(Transport::Ble | Transport::Usb));
         let ready = can_send && !self.wifi_ssid.trim().is_empty();
         let (p, ssid, pass) = (self.paths.clone(), self.wifi_ssid.trim().to_owned(), self.wifi_pass.clone());
         pane = pane.child(field(
@@ -1109,8 +1110,8 @@ impl SettingsView {
             match via {
                 Some(Transport::Usb) => "Le pasa la red por USB. Usa WiFi cuando desconectes el cable.",
                 Some(Transport::Ble) => "Le pasa la red por Bluetooth. Después usa WiFi en cuanto la encuentra.",
-                Some(Transport::Wifi) => "Le pasa la red nueva por la WiFi actual; se reconecta a la nueva.",
-                None => "Hace falta que el aparato esté conectado (USB, WiFi o Bluetooth).",
+                _ => "Hace falta que el aparato esté conectado por USB o Bluetooth (por WiFi la contraseña \
+                      viajaría sin cifrar).",
             },
             button(t, "wifi-send", "Enviar al aparato", ButtonKind::Small, ready, move |_, _, _| {
                 command(&p, AppCommand::WifiSend { ssid: ssid.clone(), pass: Secret(pass.clone()) })
