@@ -106,7 +106,10 @@ line, at most 511 bytes (longer lines are dropped).
    authentication when it has no data yet.
 
 One client at a time: a newly authenticated client replaces the previous
-one; a connection still authenticating doesn't disturb it. The device
+one; a connection still authenticating doesn't disturb it. A client that
+sends nothing for 45 s is dropped (the app sends `{"hb":1}` every 15 s when
+idle, see below), so a laptop that slept or left the network doesn't keep
+the device's Bluetooth off. The device
 counts as connected to a host when BLE is connected or a TCP client is
 authenticated; the status line, pairing hint and stale logic treat both
 the same.
@@ -121,11 +124,15 @@ with `{"ack":true}` or `{"err":true}` on the same port, mixed with the
 firmware's log lines (the app skips anything it can't read).
 
 - `{"hb":1}` is a keepalive: acked, nothing else. The app sends it to open
-  the link (no ack within 3 s means firmware without the USB link) and
-  every 15 s when it has nothing else to write.
-- The device counts a USB host as attached while lines keep coming (45 s).
-  A new one gets the WiFi status and, without data yet, `{"req":true}`.
-  `{"dismiss":true}` and WiFi status changes go to it too.
+  the link (no ack within 3 s means firmware without the USB link) and,
+  on USB and WiFi, every 15 s when it has nothing else to write.
+- The device counts a USB host as attached while lines keep coming (45 s),
+  and drops it at once when the cable is pulled (VBUS goes away). A new one
+  gets the WiFi status and, without data yet, `{"req":true}`.
+  `{"dismiss":true}`, WiFi status changes and the battery go to it too.
+- The app counts a USB or WiFi link as alive while the device acks: no ack
+  for 45 s and it reconnects. Each write starts with a newline, so a write
+  cut short can't garble the next line.
 
 ## Link priority and the buttons
 
@@ -141,12 +148,32 @@ keys only on Bluetooth. On USB or WiFi the device sends
 on the computer (Windows), repeating a held Space like a keyboard does.
 
 The window and the daemon share the serial port through `<state>/usb-claim`
-(unix seconds): while it's in the future the daemon leaves the port alone,
-so flashing and the Device page's `info` probe can open it.
+(unix seconds, written tmp + rename): while it's in the future the daemon
+leaves the port alone. The window holds it, renewed every 3 s, while the
+Flash page or the wizard's flash step is up; the Device page's `info` probe
+claims it for 5 s.
+
+## Battery and device settings
+
+Fork only.
+
+- The device sends `{"bat":{"pct":80,"chg":false,"usb":true}}` to every
+  host on a change and every minute (nothing on boards without a gauge).
+- Two optional payload keys, sent by the app only when the user changes
+  them, so the device's own PWR button keeps cycling the brightness in
+  between; the device keeps both in NVS:
+  - `br`: brightness level 0-3.
+  - `vol`: chime loudness, 0-100 % of the board's tuned level.
+- The serial `info` line also carries `link` (`usb` | `wifi` | `ble` |
+  `none`, the app's link as the device sees it), `up` (seconds since boot),
+  `heap` (free bytes, 0 when unknown), `bat`, `chg` and `usb`. The Device
+  page shows them under Diagnóstico.
 
 ## Power
 
-Fork only, on any link, matched exactly and acked:
+Fork only, on any link, matched exactly and acked. The app also sends
+`sleep` when the computer has been locked for 10 s and `wake` on unlock
+(`rest_on_lock`, Windows), each only once per change.
 
 | Line | Effect |
 | --- | --- |
