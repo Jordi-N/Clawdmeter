@@ -333,14 +333,21 @@ pub async fn connect_wifi(
     }
     // The cached address first, paired over Bluetooth or not: the handshake
     // checks it's the board that has our key.
+    let mut tried = String::new();
     if let Some(ip) = cache.load().and_then(|s| s.parse::<IpAddr>().ok()) {
-        if let Ok(ok) = TcpLink::open(SocketAddr::new(ip, PORT), &key).await {
-            return Ok(ok);
+        match TcpLink::open(SocketAddr::new(ip, PORT), &key).await {
+            Ok(ok) => return Ok(ok),
+            Err(e) => tried = format!("last address {ip}: {e}; "),
         }
     }
-    let id = device_key.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no device paired yet"))?;
+    let Some(id) = device_key else {
+        let why = format!("{tried}no Bluetooth address to look the board up on the network");
+        return Err(io::Error::new(io::ErrorKind::NotFound, why));
+    };
     let found = tokio::task::spawn_blocking(move || browse(&id, BROWSE_TIME)).await.map_err(io::Error::other)?;
-    let addr = found.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "device not found on the network"))?;
+    let addr = found.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, format!("{tried}device not found on the network (mDNS)"))
+    })?;
     let ok = TcpLink::open(addr, &key).await?;
     let _ = cache.save(&addr.ip().to_string());
     Ok(ok)

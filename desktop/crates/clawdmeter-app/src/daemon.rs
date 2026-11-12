@@ -211,6 +211,13 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         "accounts: {}",
         settings.config_dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")
     );
+    log::info!(
+        "links: USB, then {}Bluetooth (connection = {}, WiFi key {}, wifi_host {})",
+        if settings.wifi_ready() { "WiFi, then " } else { "" },
+        settings.connection.as_str(),
+        if settings.wifi_key.is_some() { "set" } else { "not set" },
+        settings.wifi_host.as_deref().unwrap_or("not set"),
+    );
     let mut engine = Engine::new(settings);
     // Blocks the usage endpoint set survive restarts (a call during one
     // lengthens it).
@@ -252,6 +259,8 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut usb_retry = Reconnect::default();
     // The last write on the current link, for the USB keepalive.
     let mut link_written_at = 0;
+    // The window's USB claim as last seen, to log when it starts and ends.
+    let mut usb_was_claimed = false;
     let mut wifi = WifiInfo::default();
     // The radio on/off line already sent on this link.
     let mut radio_sent: Option<bool> = None;
@@ -561,9 +570,18 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         // The window needs the serial port (flashing, the Device page's
         // probe): let go of it until the claim runs out.
         let usb_claimed = crate::ipc::usb_claimed(&paths, now);
+        if usb_claimed != usb_was_claimed {
+            usb_was_claimed = usb_claimed;
+            if usb_claimed {
+                log::info!("USB port claimed by the window (Device/Flash page)");
+            } else {
+                log::info!("USB port free again; trying USB");
+                usb_retry.retry_in(now, 0);
+            }
+        }
         if usb_claimed && link.as_ref().is_some_and(|l| l.transport() == Transport::Usb) {
             link.take().expect("checked").close().await;
-            log::info!("USB port claimed by the window; letting go");
+            log::info!("closing the USB link for the window");
             device_events = None;
             link_state = LinkState::Searching;
             reconnect.retry_in(now, 0);
