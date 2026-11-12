@@ -342,11 +342,8 @@ impl Render for OverviewView {
             ));
         }
         if s.rested_for_lock {
-            page = page.child(notice(
-                &t,
-                Tone::Plain,
-                "El aparato está en reposo mientras el ordenador está bloqueado.",
-            ));
+            page =
+                page.child(notice(&t, Tone::Plain, "El aparato está en reposo mientras el ordenador está bloqueado."));
         }
         if let Some(v) = s.app_update() {
             let v = v.trim_start_matches('v').to_owned();

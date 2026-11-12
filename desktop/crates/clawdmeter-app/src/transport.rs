@@ -313,13 +313,8 @@ impl UsbLink {
             }
             up.store(false, Ordering::Relaxed);
         })?;
-        let link = UsbLink {
-            writer: std::sync::Mutex::new(writer),
-            port,
-            alive,
-            last_rx,
-            health: WriteHealth::default(),
-        };
+        let link =
+            UsbLink { writer: std::sync::Mutex::new(writer), port, alive, last_rx, health: WriteHealth::default() };
         Ok((link, events))
     }
 

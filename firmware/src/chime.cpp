@@ -229,6 +229,8 @@ bool chime_init(const ChimeConfig& c) {
     return true;
 }
 
+static void start_render(void);
+
 void chime_play(void) {
     if (!ready) return;
     portENTER_CRITICAL(&state_lock);

@@ -1044,16 +1044,16 @@ impl SettingsView {
         for l in text.lines() {
             lines = lines.child(div().font_family(FONT_MONO).text_size(px(12.)).text_color(t.dim).child(l.to_owned()));
         }
-        pane.child(div().pt(px(18.)).child(subheading(t, "Diagnóstico")))
-            .child(card(t).p(px(14.)).child(lines))
-            .child(div().flex().pt(px(8.)).child(button(
+        pane.child(div().pt(px(18.)).child(subheading(t, "Diagnóstico"))).child(card(t).p(px(14.)).child(lines)).child(
+            div().flex().pt(px(8.)).child(button(
                 t,
                 "copy-diagnostics",
                 "Copiar diagnóstico",
                 ButtonKind::Small,
                 true,
                 move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone())),
-            )))
+            )),
+        )
     }
 
     /// The Device page's WiFi section: the link choice, its state, and the

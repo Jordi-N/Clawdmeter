@@ -60,8 +60,8 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-pub use clawdmeter_core::wifi::{Battery, WifiStatus};
 use clawdmeter_core::wifi::{parse_device_line, DeviceLine};
+pub use clawdmeter_core::wifi::{Battery, WifiStatus};
 pub use clawdmeter_core::DEVICE_NAME;
 
 /// Custom data service.
