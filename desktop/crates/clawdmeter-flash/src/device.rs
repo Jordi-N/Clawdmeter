@@ -62,8 +62,9 @@ pub enum DeviceError {
     NotConfirmed {
         /// The env that was flashed.
         expected: String,
-        /// What answered instead (`None`: nothing did).
-        found: Option<FirmwareInfo>,
+        /// What answered instead (`None`: nothing did). Boxed: every
+        /// `Result<_, DeviceError>` would otherwise carry its size.
+        found: Option<Box<FirmwareInfo>>,
     },
 }
 
@@ -590,7 +591,7 @@ pub fn flash_and_confirm(
     let info = wait_for_firmware(port, serial_number.as_deref(), BOOT_CONFIRM_TIMEOUT);
     match info {
         Some(i) if i.env == board.env => Ok(i),
-        found => Err(DeviceError::NotConfirmed { expected: board.env.clone(), found }),
+        found => Err(DeviceError::NotConfirmed { expected: board.env.clone(), found: found.map(Box::new) }),
     }
 }
 
@@ -750,7 +751,7 @@ mod tests {
         let e = DeviceError::NotConfirmed { expected: "waveshare_amoled_216".into(), found: None };
         assert!(e.to_string().starts_with("El firmware se escribió, pero la placa no respondió"));
         let info = FirmwareInfo { env: "waveshare_amoled_18".into(), ver: "1.0".into(), ..Default::default() };
-        let e = DeviceError::NotConfirmed { expected: "waveshare_amoled_216".into(), found: Some(info) };
+        let e = DeviceError::NotConfirmed { expected: "waveshare_amoled_216".into(), found: Some(Box::new(info)) };
         assert!(e.to_string().contains("firmware waveshare_amoled_18 en lugar de waveshare_amoled_216"));
     }
 
