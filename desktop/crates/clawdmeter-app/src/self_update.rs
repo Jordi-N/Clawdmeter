@@ -16,9 +16,8 @@ pub fn offered(latest: &str) -> bool {
 /// Download and launch the update; on `Ok` (the new version) the caller
 /// quits the app so the installer can replace it. Blocking.
 pub fn install(paths: &Paths) -> Result<String, String> {
-    let repo = Settings::load(paths)
-        .map(|s| s.release_repo)
-        .unwrap_or_else(|_| clawdmeter_flash::DEFAULT_RELEASE_REPO.into());
+    let repo =
+        Settings::load(paths).map(|s| s.release_repo).unwrap_or_else(|_| clawdmeter_flash::DEFAULT_RELEASE_REPO.into());
     let r = release::release_for_app(&repo, crate::version()).map_err(|e| e.to_string())?;
     if !offered(&r.tag) {
         return Err("Ya tienes la última versión.".into());
