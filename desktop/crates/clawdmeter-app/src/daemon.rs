@@ -452,7 +452,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         // ---- link ----
         let device_key = pinned_address().or_else(|| cache.load());
         let s = engine.settings().clone();
-        let wifi_ready = s.wifi_ready() && (s.wifi_host.is_some() || device_key.is_some());
+        // The last address that worked is enough: the handshake proves it's
+        // our board, so WiFi doesn't hang on the Bluetooth pairing.
+        let wifi_ready =
+            s.wifi_ready() && (s.wifi_host.is_some() || device_key.is_some() || wifi_cache.load().is_some());
         if connecting.as_ref().is_some_and(JoinHandle::is_finished) {
             let opened = match connecting.take().expect("checked").await {
                 Ok(Attempt::Ble(Ok((l, rx)))) => {

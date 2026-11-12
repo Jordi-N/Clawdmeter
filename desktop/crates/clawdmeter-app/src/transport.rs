@@ -331,12 +331,14 @@ pub async fn connect_wifi(
     if let Some(h) = host {
         return TcpLink::open(host_addr(&h).await?, &key).await;
     }
-    let id = device_key.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no device paired yet"))?;
+    // The cached address first, paired over Bluetooth or not: the handshake
+    // checks it's the board that has our key.
     if let Some(ip) = cache.load().and_then(|s| s.parse::<IpAddr>().ok()) {
         if let Ok(ok) = TcpLink::open(SocketAddr::new(ip, PORT), &key).await {
             return Ok(ok);
         }
     }
+    let id = device_key.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no device paired yet"))?;
     let found = tokio::task::spawn_blocking(move || browse(&id, BROWSE_TIME)).await.map_err(io::Error::other)?;
     let addr = found.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "device not found on the network"))?;
     let ok = TcpLink::open(addr, &key).await?;

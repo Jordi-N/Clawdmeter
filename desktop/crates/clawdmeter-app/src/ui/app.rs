@@ -23,6 +23,8 @@ pub struct AppView {
     dark: Option<bool>,
     /// The setup wizard fills the window.
     setup: bool,
+    /// The USB claim is held for a page that uses the port.
+    holding_usb: bool,
     overview: Entity<OverviewView>,
     settings: Entity<SettingsView>,
     flasher: Entity<FlasherView>,
@@ -76,6 +78,17 @@ impl AppView {
                     v.go(*page, cx);
                     window.activate_window();
                 }
+                // The pages that open the serial port (the Device page's
+                // probe, the flasher, the wizard's flasher) keep the daemon
+                // off it the whole time they're up, so it never reopens the
+                // port between two probes. It uses WiFi meanwhile.
+                let usb_page = matches!(v.page(), Page::Device | Page::Flash | Page::Setup);
+                if usb_page {
+                    ipc::hold_usb(&p, 10);
+                } else if v.holding_usb {
+                    ipc::release_usb(&p);
+                }
+                v.holding_usb = usb_page;
                 // Light/dark can change after the first frame (on X11 it
                 // arrives from the settings portal). Polled rather than
                 // observed: GPUI 0.2.2's X11 client redraws inside the portal
@@ -91,7 +104,16 @@ impl AppView {
             }
         })
         .detach();
-        let mut v = AppView { dark: None, page: Page::Overview, setup: false, overview, settings, flasher, wizard };
+        let mut v = AppView {
+            dark: None,
+            page: Page::Overview,
+            setup: false,
+            holding_usb: false,
+            overview,
+            settings,
+            flasher,
+            wizard,
+        };
         v.go(page, cx);
         v
     }
