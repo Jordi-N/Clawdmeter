@@ -1110,8 +1110,7 @@ impl SettingsView {
             match via {
                 Some(Transport::Usb) => "Le pasa la red por USB. Usa WiFi cuando desconectes el cable.",
                 Some(Transport::Ble) => "Le pasa la red por Bluetooth. Después usa WiFi en cuanto la encuentra.",
-                _ => "Hace falta que el aparato esté conectado por USB o Bluetooth (por WiFi la contraseña \
-                      viajaría sin cifrar).",
+                _ => "Hace falta conectarlo por USB o Bluetooth: por WiFi la contraseña iría sin cifrar.",
             },
             button(t, "wifi-send", "Enviar al aparato", ButtonKind::Small, ready, move |_, _, _| {
                 command(&p, AppCommand::WifiSend { ssid: ssid.clone(), pass: Secret(pass.clone()) })
