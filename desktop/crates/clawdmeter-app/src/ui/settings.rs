@@ -819,6 +819,15 @@ impl SettingsView {
         let p = self.paths.clone();
         pane = pane.child(field(
             t,
+            "Buscar ahora",
+            "Consulta GitHub en este momento, sin esperar a la comprobación diaria.",
+            button(t, "check-update", "Buscar ahora", ButtonKind::Small, true, move |_, _, _| {
+                command(&p, AppCommand::CheckUpdate)
+            }),
+        ));
+        let p = self.paths.clone();
+        pane = pane.child(field(
+            t,
             "Olvidar dispositivo guardado",
             "Borra la dirección guardada en la app y busca un Clawdmeter emparejado. El emparejamiento Bluetooth se mantiene.",
             button(t, "forget", "Olvidar", ButtonKind::Small, true, move |_, _, _| command(&p, AppCommand::Forget)),
