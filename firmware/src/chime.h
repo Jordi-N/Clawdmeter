@@ -37,3 +37,5 @@ void chime_tick(void);
 // codec volume (0..100) until reboot, then play it (after a background
 // re-render when the gain changed).
 void chime_tune(float gain, int volume);
+// Set the ding's gain (0..1) without playing it; the next play uses it.
+void chime_set_gain(float gain);

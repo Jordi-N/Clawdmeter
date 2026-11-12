@@ -14,3 +14,6 @@ void sound_hal_chime(void);
 // Speaker tuning (`chime <gain> [volume]`): try a gain (0..1) and codec volume (0..100,
 // < 0 keeps it) until reboot, and play the ding. No-op without sound.
 void sound_hal_tune(float gain, int volume);
+// Loudness of the ding, 0-100 % of the board's tuned level, without playing
+// it. Weak default (board_info_default.cpp): no-op on boards without sound.
+void sound_hal_set_level(int pct);

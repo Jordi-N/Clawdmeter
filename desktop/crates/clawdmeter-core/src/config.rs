@@ -267,6 +267,14 @@ pub struct Settings {
     pub attention_anim: AttentionAnim,
     /// Pace marker on the device's usage bars (`pm`, default off).
     pub pace_marker: bool,
+    /// Screen brightness level 0-3 (`br`); `None`: whatever the device has
+    /// (its PWR button cycles it).
+    pub brightness: Option<u8>,
+    /// Chime loudness 0-100 % (`vol`); `None`: the device's own.
+    pub chime_volume: Option<u8>,
+    /// Rest the device while this computer is locked, wake it on unlock
+    /// (`rest_on_lock`, default on; Windows).
+    pub rest_on_lock: bool,
     /// Which link to use (`connection`, default Bluetooth only).
     pub connection: Connection,
     /// `wifi_host`: the device's address, used instead of mDNS (testing
@@ -404,6 +412,9 @@ impl Settings {
             liveliness: cfg.get("liveliness").map(parse_liveliness).unwrap_or(DEFAULT_LIVELINESS),
             attention_anim: cfg.get("attention_anim").map(AttentionAnim::parse).unwrap_or_default(),
             pace_marker: on_off(cfg.get("pace_marker"), false),
+            brightness: cfg.get("brightness").and_then(|v| v.trim().parse::<u8>().ok()).map(|v| v.min(3)),
+            chime_volume: cfg.get("chime_volume").and_then(|v| v.trim().parse::<u8>().ok()).map(|v| v.min(100)),
+            rest_on_lock: on_off(cfg.get("rest_on_lock"), true),
             connection: cfg.get("connection").map(Connection::parse).unwrap_or_default(),
             wifi_host: cfg.get("wifi_host").filter(|s| !s.is_empty()).map(str::to_owned),
             wifi_key: cfg.get("wifi_key").filter(|s| is_key(s)).map(|s| Secret(s.to_owned())),
@@ -467,6 +478,7 @@ impl Settings {
             ("alert_chime", "beep", self.alert_chime, current.alert_chime),
             ("desktop_chime", "", self.desktop_chime, current.desktop_chime),
             ("pace_marker", "", self.pace_marker, current.pace_marker),
+            ("rest_on_lock", "", self.rest_on_lock, current.rest_on_lock),
         ] {
             if now != was {
                 cfg.set(key, oo(now));
@@ -498,6 +510,17 @@ impl Settings {
         }
         if current.attention_anim != self.attention_anim {
             cfg.set("attention_anim", self.attention_anim.as_str());
+        }
+        for (key, now, was) in [
+            ("brightness", self.brightness, current.brightness),
+            ("chime_volume", self.chime_volume, current.chime_volume),
+        ] {
+            if now != was {
+                match now {
+                    Some(v) => cfg.set(key, &v.to_string()),
+                    None => cfg.remove(key),
+                }
+            }
         }
         if current.connection != self.connection {
             cfg.set("connection", self.connection.as_str());
@@ -675,6 +698,16 @@ mod tests {
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("attention_anim"), Some("off"));
         assert_eq!(Settings::from_config(&cfg, &paths(), None).attention_anim, AttentionAnim::Off);
+    }
+
+    #[test]
+    fn device_levels() {
+        assert_eq!(settings("").brightness, None, "the device keeps its own");
+        assert_eq!(settings("brightness = 1\nchime_volume = 40\n").brightness, Some(1));
+        assert_eq!(settings("chime_volume = 40\n").chime_volume, Some(40));
+        assert_eq!(settings("brightness = 9\nchime_volume = 300\n").brightness, Some(3), "clamped");
+        assert_eq!(settings("chime_volume = 250\n").chime_volume, Some(100), "clamped");
+        assert_eq!(settings("brightness = high\n").brightness, None);
     }
 
     #[test]

@@ -23,6 +23,8 @@ pub struct OverviewView {
     desktop_chime: bool,
     /// The app update: downloading, or what went wrong.
     app_update: Option<(bool, String)>,
+    /// Refresh ticks, for the slower reads.
+    ticks: u32,
 }
 
 impl EventEmitter<Navigate> for OverviewView {}
@@ -37,15 +39,20 @@ impl OverviewView {
             }
         })
         .detach();
-        let mut v = OverviewView { paths, snap: None, refreshing: None, desktop_chime: false, app_update: None };
+        let mut v =
+            OverviewView { paths, snap: None, refreshing: None, desktop_chime: false, app_update: None, ticks: 0 };
         v.reload(clawdmeter_core::unix_now());
         v
     }
 
     fn reload(&mut self, now: i64) {
         self.snap = live_status(&self.paths);
-        if let Ok(s) = Settings::load(&self.paths) {
-            self.desktop_chime = s.desktop_chime;
+        // The config only for the desktop chime toggle: every 5 s is plenty.
+        self.ticks += 1;
+        if self.ticks % 10 == 1 {
+            if let Ok(s) = Settings::load(&self.paths) {
+                self.desktop_chime = s.desktop_chime;
+            }
         }
         if let Some(at) = self.refreshing {
             let done = match &self.snap {
@@ -66,8 +73,13 @@ impl OverviewView {
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let before = self.snap.clone();
         self.reload(clawdmeter_core::unix_now());
-        // "updated N s ago" ticks, so redraw while running.
-        if self.snap.is_some() || before.is_some() {
+        // Redraw on a change, and once a second for "updated N s ago".
+        let changed = match (&before, &self.snap) {
+            (Some(a), Some(b)) => !a.same_content(b),
+            (None, None) => false,
+            _ => true,
+        };
+        if changed || (self.snap.is_some() && self.ticks.is_multiple_of(2)) {
             cx.notify();
         }
     }
@@ -322,6 +334,20 @@ impl Render for OverviewView {
                 .child(meter(&t, "Sesión", s.session_pct, reset_text(s.session_resets_at, now, "Sin empezar")))
                 .child(meter(&t, "Semana", s.week_pct, reset_text(s.week_resets_at, now, "---"))),
         );
+        if let Some(b) = s.battery.filter(|b| b.low()) {
+            page = page.child(notice(
+                &t,
+                Tone::Bad,
+                format!("Batería del aparato baja ({} %). Conéctalo al cargador.", b.pct),
+            ));
+        }
+        if s.rested_for_lock {
+            page = page.child(notice(
+                &t,
+                Tone::Plain,
+                "El aparato está en reposo mientras el ordenador está bloqueado.",
+            ));
+        }
         if let Some(v) = s.app_update() {
             let v = v.trim_start_matches('v').to_owned();
             let busy = self.app_update.as_ref().is_some_and(|(b, _)| *b);

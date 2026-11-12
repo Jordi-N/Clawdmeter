@@ -56,7 +56,7 @@ impl FlashHardware for FakeBoard {
             "old" => "1.8.2",
             _ => return None,
         };
-        Some(FirmwareInfo { env: ENV.into(), ver: ver.into(), rev: String::new(), link: String::new() })
+        Some(FirmwareInfo { env: ENV.into(), ver: ver.into(), ..Default::default() })
     }
     fn probe_chip(&self, _port: &str) -> Result<ChipInfo, DeviceError> {
         std::thread::sleep(Duration::from_millis(600));

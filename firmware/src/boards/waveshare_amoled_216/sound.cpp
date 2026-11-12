@@ -29,6 +29,8 @@ void sound_hal_init(void) {
 
 void sound_hal_chime(void) { chime_play(); }
 void sound_hal_tune(float gain, int volume) { chime_tune(gain, volume); }
+// 100 % is the ding's own tuned gain (chime.cpp DING_GAIN).
+void sound_hal_set_level(int pct) { chime_set_gain(0.7f * (float)pct / 100.0f); }
 void sound_hal_tick(void)       { chime_tick(); }
 
 #endif  // BOARD_HAS_SOUND

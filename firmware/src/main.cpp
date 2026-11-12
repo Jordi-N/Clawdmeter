@@ -155,7 +155,11 @@ enum Link { LINK_BLE, LINK_TCP, LINK_USB };
 #define USB_HOST_TIMEOUT_MS 45000
 static uint32_t usb_last_ms = 0;
 static bool usb_seen = false;
-static bool usb_host(void) { return usb_seen && millis() - usb_last_ms < USB_HOST_TIMEOUT_MS; }
+static bool usb_host(void) {
+    // Expired for good, so millis() wrapping (49.7 days) can't revive it.
+    if (usb_seen && millis() - usb_last_ms >= USB_HOST_TIMEOUT_MS) usb_seen = false;
+    return usb_seen;
+}
 static void on_usb_line(const char* line);
 
 static void send_screenshot() {
@@ -196,13 +200,20 @@ static void send_screenshot() {
 #endif
 }
 
+static const char* link_name(void);
+
 // One JSON line identifying this build, for the desktop flasher's first
-// detection probe. Keys are fixed: env, ver, rev, link.
+// detection probe and the app's diagnostics. env, ver, rev and link are
+// fixed; up (s), heap (bytes, 0 = unknown) and bat/chg/usb are extra.
 static void send_info() {
     char w[96];
     const size_t wn = host_wifi_status(w, sizeof(w));   // 0 on boards without WiFi
-    Serial.printf("{\"env\":\"%s\",\"ver\":\"%s\",\"rev\":\"%s\",\"link\":\"ble\"%s%s}\n",
-                  CLAWD_ENV, CLAWD_VERSION, board_hal_rev(), wn ? ",\"wifi\":" : "", wn ? w : "");
+    Serial.printf("{\"env\":\"%s\",\"ver\":\"%s\",\"rev\":\"%s\",\"link\":\"%s\",\"up\":%lu,"
+                  "\"heap\":%lu,\"bat\":%d,\"chg\":%s,\"usb\":%s%s%s}\n",
+                  CLAWD_ENV, CLAWD_VERSION, board_hal_rev(), link_name(), (unsigned long)(millis() / 1000),
+                  (unsigned long)board_hal_free_heap(), power_hal_battery_pct(),
+                  power_hal_is_charging() ? "true" : "false", power_hal_is_vbus_in() ? "true" : "false",
+                  wn ? ",\"wifi\":" : "", wn ? w : "");
 }
 
 static void check_serial_cmd() {
@@ -412,6 +423,24 @@ static Link host_link(void) {
     return LINK_BLE;
 }
 
+static const char* link_name(void) {
+    switch (host_link()) {
+    case LINK_USB: return "usb";
+    case LINK_TCP: return "wifi";
+    default:       return ble_get_state() == BLE_STATE_CONNECTED ? "ble" : "none";
+    }
+}
+
+// {"bat":{"pct":80,"chg":false,"usb":true}} for the app; 0 when the board
+// has no battery gauge.
+static size_t battery_line(char* buf, size_t cap) {
+    const int pct = power_hal_battery_pct();
+    if (pct < 0) return 0;
+    const int n = snprintf(buf, cap, "{\"bat\":{\"pct\":%d,\"chg\":%s,\"usb\":%s}}", pct,
+                           power_hal_is_charging() ? "true" : "false", power_hal_is_vbus_in() ? "true" : "false");
+    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
+}
+
 // A key for Claude Code. Over USB or WiFi the app types it on the computer
 // ({"key":...,"down":...}); over BLE the device is the keyboard. Returns the
 // link used, so the release goes the same way.
@@ -506,6 +535,8 @@ static void handle_line(const char* json, Link link) {
             sound_hal_chime();
         }
         if (usage.pace_marker >= 0) pace_marker_set(usage.pace_marker != 0);
+        if (usage.brightness >= 0) brightness_set_index(usage.brightness);
+        if (usage.chime_level >= 0) chime_level_set(usage.chime_level);
         ui_update(&usage);
         // A prompt (or you're back after a gap): you're at the computer,
         // so a dimmed or dark panel wakes before Clawd notices you. A
@@ -585,7 +616,18 @@ static void report_wifi(void) {
 
 void loop() {
     idle_tick();
-    lv_timer_handler();
+    // Nothing is drawn while the panel is dark (sleep or rest): the redraws
+    // would only cost CPU. Input is still read, so a touch or press wakes it.
+    {
+        static bool dark = false;
+        const bool now_dark = idle_is_asleep();
+        if (now_dark != dark) {
+            dark = now_dark;
+            lv_display_enable_invalidation(lv_display_get_default(), !dark);
+            if (!dark) lv_obj_invalidate(lv_screen_active());
+        }
+    }
+    const uint32_t lv_wait = lv_timer_handler();
     ui_tick_anim();
     agents_view_tick(millis());
     ble_tick();
@@ -681,12 +723,25 @@ void loop() {
     int  pct      = power_hal_battery_pct();
     bool charging = power_hal_is_charging();
     bool vbus     = power_hal_is_vbus_in();
-    if (pct != last_pct || charging != last_charging || vbus != last_vbus) {
+    static uint32_t bat_sent_ms = 0;
+    const bool bat_changed = pct != last_pct || charging != last_charging || vbus != last_vbus;
+    // The cable went out: no USB host any more, whatever the 45 s timeout says
+    // (boards that can't sense VBUS never see this edge).
+    if (last_vbus && !vbus && usb_seen) {
+        usb_seen = false;
+        Serial.println("USB: cable unplugged, app detached");
+    }
+    if (bat_changed) {
         if (pct != last_pct) ble_set_battery_level(pct);
         last_pct = pct;
         last_charging = charging;
         last_vbus = vbus;
         ui_update_battery(pct, charging, vbus);
+    }
+    if (bat_changed || millis() - bat_sent_ms >= 60000) {
+        bat_sent_ms = millis();
+        char line[64];
+        if (battery_line(line, sizeof(line))) send_all(line);
     }
 
     check_serial_cmd();
@@ -723,5 +778,7 @@ void loop() {
         }
     }
 
-    delay(5);
+    // Sleep only as long as LVGL has nothing to do (1-5 ms), not a fixed 5 ms
+    // on top of every frame.
+    delay(lv_wait < 1 ? 1 : lv_wait > 5 ? 5 : lv_wait);
 }

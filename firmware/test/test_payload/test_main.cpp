@@ -121,6 +121,19 @@ static void test_pace_marker(void) {
     TEST_ASSERT_EQUAL_INT(1, d.pace_marker);
 }
 
+static void test_device_levels(void) {
+    UsageData d;
+    TEST_ASSERT_TRUE(payload_parse("{\"ok\":true}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(-1, d.brightness);       // absent: keep the saved setting
+    TEST_ASSERT_EQUAL_INT(-1, d.chime_level);
+    TEST_ASSERT_TRUE(payload_parse("{\"br\":1,\"vol\":40}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(1, d.brightness);
+    TEST_ASSERT_EQUAL_INT(40, d.chime_level);
+    TEST_ASSERT_TRUE(payload_parse("{\"br\":9,\"vol\":250}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(3, d.brightness);        // clamped
+    TEST_ASSERT_EQUAL_INT(100, d.chime_level);
+}
+
 static void test_long_strings_truncate(void) {
     UsageData d;
     TEST_ASSERT_TRUE(payload_parse("{\"st\":\"abcdefghijklmnopqrstuvwxyz\"}", &d, nullptr));
@@ -137,6 +150,7 @@ int main(void) {
     RUN_TEST(test_liveliness);
     RUN_TEST(test_attention_animation);
     RUN_TEST(test_pace_marker);
+    RUN_TEST(test_device_levels);
     RUN_TEST(test_long_strings_truncate);
     return UNITY_END();
 }

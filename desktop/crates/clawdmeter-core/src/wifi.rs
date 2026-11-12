@@ -100,6 +100,27 @@ pub struct WifiStatus {
     pub ssid: Option<String>,
 }
 
+/// The device's battery, as it reports it (`{"bat":{...}}`, fork firmware,
+/// on change and every minute).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Battery {
+    /// Charge, 0-100 %.
+    pub pct: u8,
+    /// Charging now.
+    #[serde(default)]
+    pub chg: bool,
+    /// USB power present.
+    #[serde(default)]
+    pub usb: bool,
+}
+
+impl Battery {
+    /// Low enough to warn about (and not already charging).
+    pub fn low(&self) -> bool {
+        self.pct < 15 && !self.chg
+    }
+}
+
 /// True for a 32-hex-character key.
 pub fn is_key(s: &str) -> bool {
     s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
@@ -205,6 +226,8 @@ pub enum DeviceLine {
     },
     /// Its WiFi state (alone, or in the ack of a `wifi` line).
     Wifi(WifiStatus),
+    /// `{"bat":{"pct":80,"chg":false,"usb":true}}`: its battery.
+    Battery(Battery),
     /// `{"key":"space","down":true}`: a button the app types on this
     /// computer while the link is USB or WiFi (over BLE the device is the
     /// keyboard).
@@ -239,6 +262,9 @@ pub fn parse_device_line(text: &str) -> Option<DeviceLine> {
     if let (Some(nonce), Some(proof)) = (v.get("nonce").and_then(Value::as_str), v.get("proof").and_then(Value::as_str))
     {
         return Some(DeviceLine::Challenge { nonce: nonce.to_owned(), proof: proof.to_owned() });
+    }
+    if let Some(b) = v.get("bat") {
+        return serde_json::from_value(b.clone()).ok().map(DeviceLine::Battery);
     }
     if let Some(name) = v.get("key").and_then(Value::as_str) {
         let down = v.get("down").and_then(Value::as_bool)?;
@@ -317,6 +343,12 @@ mod tests {
             Some(DeviceLine::Key { name: "shift_tab".into(), down: false })
         );
         assert_eq!(parse_device_line(r#"{"key":"space"}"#), None, "no direction, no key");
+        assert_eq!(
+            parse_device_line(r#"{"bat":{"pct":12,"chg":false,"usb":false}}"#),
+            Some(DeviceLine::Battery(Battery { pct: 12, chg: false, usb: false }))
+        );
+        assert!(Battery { pct: 12, chg: false, usb: false }.low());
+        assert!(!Battery { pct: 12, chg: true, usb: true }.low(), "charging is fine");
         let ok = WifiStatus { st: "ok".into(), ip: Some("192.168.1.5".into()), ssid: Some("Casa".into()) };
         assert_eq!(
             parse_device_line(r#"{"wifi":{"st":"ok","ip":"192.168.1.5","ssid":"Casa"}}"#),

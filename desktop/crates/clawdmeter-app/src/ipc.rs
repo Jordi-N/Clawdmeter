@@ -24,7 +24,7 @@ use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use clawdmeter_core::wifi::{Power, Secret, Transport, WifiStatus};
+use clawdmeter_core::wifi::{Battery, Power, Secret, Transport, WifiStatus};
 use clawdmeter_core::Paths;
 use serde::{Deserialize, Serialize};
 
@@ -152,6 +152,12 @@ pub struct StatusSnapshot {
     /// That result: `true` done, `false` failed, absent while waiting.
     #[serde(default)]
     pub wifi_send_ok: Option<bool>,
+    /// The device's battery (fork firmware), while connected.
+    #[serde(default)]
+    pub battery: Option<Battery>,
+    /// The device is resting because this computer is locked.
+    #[serde(default)]
+    pub rested_for_lock: bool,
 }
 
 impl StatusSnapshot {
@@ -213,6 +219,8 @@ impl StatusSnapshot {
             wifi_fallback: s.wifi.fallback,
             wifi_send: s.wifi.send.as_ref().map(|(_, m)| m.clone()),
             wifi_send_ok: s.wifi.send.as_ref().and_then(|(ok, _)| *ok),
+            battery: s.battery,
+            rested_for_lock: s.rested_for_lock,
         }
     }
 
@@ -312,7 +320,13 @@ pub fn usb_claim_file(paths: &Paths) -> PathBuf {
 /// while a page needs it). Doesn't wait.
 pub fn hold_usb(paths: &Paths, secs: i64) {
     let until = clawdmeter_core::unix_now() + secs;
-    let wrote = fs::create_dir_all(&paths.state_dir).and_then(|()| fs::write(usb_claim_file(paths), until.to_string()));
+    // tmp + rename: the daemon never reads a half-written file (which would
+    // read as "free" and reopen the port mid-flash).
+    let file = usb_claim_file(paths);
+    let tmp = file.with_extension("tmp");
+    let wrote = fs::create_dir_all(&paths.state_dir)
+        .and_then(|()| fs::write(&tmp, until.to_string()))
+        .and_then(|()| fs::rename(&tmp, &file));
     if let Err(e) = wrote {
         log::warn!("couldn't claim the USB port: {e}");
     }
@@ -584,6 +598,8 @@ mod tests {
             last_write_at: last_write,
             claude: None,
             wifi: Default::default(),
+            battery: None,
+            rested_for_lock: false,
         }
     }
 

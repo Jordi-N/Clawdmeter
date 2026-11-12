@@ -143,13 +143,22 @@ impl SetupView {
         cx.emit(SetupEvent::Finished);
     }
 
+    /// The step on screen.
+    pub fn step(&self) -> Step {
+        self.step
+    }
+
     /// Show a step.
     pub fn goto(&mut self, step: Step, cx: &mut Context<Self>) {
         self.step = step;
         self.flasher.update(cx, |f, cx| f.set_active(step == Step::Device, cx));
-        // The Hooks page shows inside the hooks step; otherwise the settings
-        // view stays hidden (and off USB).
-        let page = if step == Step::Hooks { Page::Hooks } else { Page::Setup };
+        // The Hooks page shows inside the hooks step and the WiFi form inside
+        // the connect step; otherwise the settings view stays hidden.
+        let page = match step {
+            Step::Hooks => Page::Hooks,
+            Step::Pair => Page::Setup,
+            _ => Page::Overview,
+        };
         self.settings.update(cx, |s, cx| s.show(page, true, cx));
         self.tick(cx);
         cx.notify();
@@ -293,11 +302,17 @@ impl SetupView {
             .items_center()
             .gap(px(16.))
             .pt(px(12.))
-            .child(Self::title("Empareja por Bluetooth"))
-            .child(div().max_w(px(500.)).text_center().child(para(
+            .child(Self::title("Conecta el aparato"))
+            .child(div().max_w(px(520.)).text_center().child(para(
                 t,
-                "Empareja Clawdmeter en los ajustes de Bluetooth del ordenador. Aparece como un teclado para que sus \
-                 botones puedan enviar pulsaciones.",
+                "Con el cable USB ya funciona. Para usarlo sin cable, envíale tu WiFi ahora por el USB; el Bluetooth \
+                 queda como alternativa.",
+            )))
+            .child(div().w(px(520.)).child(self.settings.clone()))
+            .child(div().max_w(px(520.)).text_center().pt(px(8.)).child(para(
+                t,
+                "O por Bluetooth: empareja Clawdmeter en los ajustes del ordenador. Aparece como un teclado para que \
+                 sus botones puedan enviar pulsaciones.",
             )))
             .child(
                 card(t).w(px(520.)).child(div().text_size(px(14.)).line_height(px(21.)).child(how)).child(

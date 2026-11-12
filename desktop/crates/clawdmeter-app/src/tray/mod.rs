@@ -173,6 +173,9 @@ struct TrayApp {
     shown_state: Option<TrayState>,
     last_written: Option<StatusSnapshot>,
     last_written_at: i64,
+    /// The device firmware record, re-read every few seconds.
+    device_firmware: Option<String>,
+    firmware_read_at: i64,
     menu_at: i64,
     chimes_muted: bool,
     /// The window process, while it runs.
@@ -234,7 +237,7 @@ impl TrayApp {
         snap.chimes_muted = self.chimes_muted;
         snap.windowed = !self.use_tray;
         snap.latest_firmware = self.latest.lock().ok().and_then(|l| l.clone());
-        snap.device_firmware = ipc::load_firmware_record(&self.paths).map(|r| r.ver);
+        snap.device_firmware = self.device_firmware.clone();
         snap
     }
 
@@ -290,6 +293,11 @@ impl TrayApp {
         }
 
         // Status out: tray + file.
+        // The firmware record changes only after a flash or a probe.
+        if now - self.firmware_read_at >= 5 {
+            self.firmware_read_at = now;
+            self.device_firmware = ipc::load_firmware_record(&self.paths).map(|r| r.ver);
+        }
         let snap = self.snapshot(now);
         let state = snap.tray_state();
         if self.shown_state != Some(state) {
@@ -312,11 +320,15 @@ impl TrayApp {
         }
         let changed = self.last_written.as_ref().is_none_or(|w| !w.same_content(&snap));
         if changed || now - self.last_written_at >= STATUS_REFRESH_SECS {
-            if let Err(e) = ipc::write_status(&self.paths, &snap) {
-                log::warn!("status file: {e}");
+            // Only a write that landed counts: a failed one (antivirus on the
+            // rename) is retried next tick, before the window thinks we died.
+            match ipc::write_status(&self.paths, &snap) {
+                Ok(()) => {
+                    self.last_written = Some(snap);
+                    self.last_written_at = now;
+                }
+                Err(e) => log::warn!("status file: {e}"),
             }
-            self.last_written = Some(snap);
-            self.last_written_at = now;
         }
 
         // Reap the window; with no tray, the window is the app. A child that
@@ -479,6 +491,8 @@ fn run_locked(paths: Paths, _lock: Option<std::fs::File>) -> i32 {
         shown_state: None,
         last_written: None,
         last_written_at: 0,
+        device_firmware: None,
+        firmware_read_at: 0,
         menu_at: 0,
         chimes_muted: false,
         window: None,

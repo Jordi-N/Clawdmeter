@@ -32,16 +32,29 @@ mod imp {
 
     pub fn launch(paths: &clawdmeter_core::Paths, r: &clawdmeter_flash::Release) -> Result<(), String> {
         let msi = clawdmeter_flash::release::fetch_installer(r, &paths.cache_dir).map_err(|e| e.to_string())?;
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        // ping: about 3 s for the app to quit; `start /wait`: cmd doesn't wait
-        // for a GUI program otherwise. raw_arg keeps cmd's own quoting.
+        // The MSI installs per user here (tools/packaging/wix): start that
+        // copy afterwards, not a .zip copy this might be running from.
+        let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA no está definido")?;
+        let exe = std::path::PathBuf::from(local).join("Programs").join("Clawdmeter").join("clawdmeter.exe");
+        let log = paths.cache_dir.join("update-msi.log");
+        // A script file rather than a command line: no quoting games. It
+        // waits (up to 30 s) for every Clawdmeter process to quit, installs
+        // with a log (update-msi.log, for when it fails), then starts the app.
+        let q = |p: &std::path::Path| p.display().to_string().replace('\'', "''");
         let script = format!(
-            "/C ping -n 4 127.0.0.1 >nul & start \"\" /wait msiexec /i \"{}\" /passive /norestart & start \"\" \"{}\"",
-            msi.display(),
-            exe.display()
+            "$ErrorActionPreference = 'SilentlyContinue'\r\n\
+             Get-Process clawdmeter | Wait-Process -Timeout 30\r\n\
+             Start-Process msiexec -Wait -ArgumentList @('/i', '\"{}\"', '/passive', '/norestart', '/l*v', '\"{}\"')\r\n\
+             Start-Process '{}'\r\n",
+            q(&msi),
+            q(&log),
+            q(&exe)
         );
-        std::process::Command::new("cmd")
-            .raw_arg(script)
+        let ps1 = paths.cache_dir.join("update.ps1");
+        std::fs::write(&ps1, script).map_err(|e| format!("No se pudo preparar la actualización: {e}"))?;
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File"])
+            .arg(&ps1)
             .creation_flags(0x0800_0000 | 0x0000_0200) // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
             .spawn()
             .map_err(|e| format!("No se pudo lanzar el instalador: {e}"))?;

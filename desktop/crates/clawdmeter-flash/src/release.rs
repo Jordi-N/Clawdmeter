@@ -148,8 +148,21 @@ pub fn latest_url(repo: &str) -> String {
     format!("https://api.github.com/repos/{repo}/releases/latest")
 }
 
+/// A GitHub API call or a small asset.
+const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// A firmware image or the installer, on a slow link.
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 fn get(url: &str) -> Result<ureq::http::Response<ureq::Body>, ReleaseError> {
-    ureq::get(url)
+    get_within(url, API_TIMEOUT)
+}
+
+/// A GET that gives up after `timeout`, so a stalled connection can't leave
+/// the update check or a "Descargando…" button hanging.
+fn get_within(url: &str, timeout: std::time::Duration) -> Result<ureq::http::Response<ureq::Body>, ReleaseError> {
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(timeout)).build().into();
+    agent
+        .get(url)
         .header("User-Agent", USER_AGENT)
         .header("Accept", "application/vnd.github+json, application/octet-stream, */*")
         .call()
@@ -251,7 +264,7 @@ pub fn fetch_image(
         }
     }
     let url = release.assets.get(&board.file).ok_or_else(|| ReleaseError::MissingAsset(board.file.clone()))?;
-    let resp = get(url)?;
+    let resp = get_within(url, DOWNLOAD_TIMEOUT)?;
     let total =
         resp.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut reader = resp.into_body().into_reader();
@@ -299,15 +312,19 @@ pub fn fetch_installer(release: &Release, cache_dir: &Path) -> Result<PathBuf, R
     let expected = sum_for(&get_string(sums_url)?, &name)
         .ok_or_else(|| ReleaseError::MissingAsset(format!("{name} in {SUMS_ASSET}")))?;
     let mut data = Vec::new();
-    let read = get(url)?.into_body().into_reader().read_to_end(&mut data);
+    let read = get_within(url, DOWNLOAD_TIMEOUT)?.into_body().into_reader().read_to_end(&mut data);
     read.map_err(|e| ReleaseError::Offline(format!("{url}: {e}")))?;
     let actual = sha256_hex(&data);
     if actual != expected {
         return Err(ReleaseError::HashMismatch { file: name, expected, actual });
     }
     fs::create_dir_all(cache_dir)?;
+    // tmp + rename: a copy an antivirus is still scanning (or an earlier
+    // msiexec still holds) is replaced whole, never half-written.
     let path = cache_dir.join(&name);
-    fs::write(&path, &data)?;
+    let tmp = path.with_extension("part");
+    fs::write(&tmp, &data)?;
+    fs::rename(&tmp, &path)?;
     Ok(path)
 }
 

@@ -232,10 +232,18 @@ bool chime_init(const ChimeConfig& c) {
 void chime_play(void) {
     if (!ready) return;
     portENTER_CRITICAL(&state_lock);
+    // The gain changed since the last render (chime_set_gain): render first.
+    const bool stale = render_started && !rendering && !playing && pcm_gain != gain;
+    if (stale) rendering = true;
     const bool wait = !render_started || rendering;
     if (wait) pending = true;
     portEXIT_CRITICAL(&state_lock);
-    if (!wait) start_playback();
+    if (stale) start_render();
+    else if (!wait) start_playback();
+}
+
+void chime_set_gain(float g) {
+    gain = !(g >= 0.0f) ? 0.0f : (g > 1.0f ? 1.0f : g);   // NaN too
 }
 
 // Run render_task in the background at the lowest priority (the loop and the

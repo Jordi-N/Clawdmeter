@@ -25,6 +25,8 @@ pub struct AppView {
     setup: bool,
     /// The USB claim is held for a page that uses the port.
     holding_usb: bool,
+    /// When the claim was last renewed (unix s).
+    held_at: i64,
     overview: Entity<OverviewView>,
     settings: Entity<SettingsView>,
     flasher: Entity<FlasherView>,
@@ -82,10 +84,18 @@ impl AppView {
                 // probe, the flasher, the wizard's flasher) keep the daemon
                 // off it the whole time they're up, so it never reopens the
                 // port between two probes. It uses WiFi meanwhile.
-                let usb_page = matches!(v.page(), Page::Device | Page::Flash | Page::Setup);
-                if usb_page {
+                // The Device page doesn't hold it: its one probe claims the
+                // port for a moment, and the daemon keeps USB meanwhile.
+                let usb_page = match v.page() {
+                    Page::Flash => true,
+                    Page::Setup => v.wizard.read(cx).step() == super::setup::Step::Device,
+                    _ => false,
+                };
+                let now = clawdmeter_core::unix_now();
+                if usb_page && (!v.holding_usb || now - v.held_at >= 3) {
                     ipc::hold_usb(&p, 10);
-                } else if v.holding_usb {
+                    v.held_at = now;
+                } else if !usb_page && v.holding_usb {
                     ipc::release_usb(&p);
                 }
                 v.holding_usb = usb_page;
@@ -109,6 +119,7 @@ impl AppView {
             page: Page::Overview,
             setup: false,
             holding_usb: false,
+            held_at: 0,
             overview,
             settings,
             flasher,

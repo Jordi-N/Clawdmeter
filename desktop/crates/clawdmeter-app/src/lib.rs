@@ -21,6 +21,7 @@ pub mod keys;
 pub mod logger;
 pub mod onboarding;
 pub mod self_update;
+pub mod session;
 pub mod transport;
 pub mod tray;
 pub mod ui;

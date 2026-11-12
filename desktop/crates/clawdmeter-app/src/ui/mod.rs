@@ -148,7 +148,11 @@ pub fn run(page: Option<Page>, paths: Paths, args: WindowArgs) -> i32 {
         None if crate::onboarding::needed(&paths) => Page::Setup,
         None => Page::Overview,
     };
+    let p = paths.clone();
     open(move |window, cx| app::AppView::new(paths.clone(), page, args.manifest.clone(), window, cx));
+    // Closed on the Device/Flash page: the daemon may have USB back now
+    // instead of when the claim runs out.
+    ipc::release_usb(&p);
     drop(lock);
     0
 }

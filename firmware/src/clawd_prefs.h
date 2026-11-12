@@ -5,6 +5,7 @@
 //   liveliness       `lv`  1 No-nonsense .. 5 All-nonsense (clawd_policy.h)
 //   attention anim   `aa`  seconds he points and waves for an alert; 0 = off
 //   pace marker      `pm`  1 = pace marker on the usage bars (pace.h)
+//   chime level      `vol` 0-100 % of the board's tuned ding (sound_hal_set_level)
 
 void clawd_prefs_init(void);          // after director_init(): load and apply the saved values
 void liveliness_set(int level);       // apply; saved only when it changes
@@ -13,3 +14,5 @@ void attn_anim_set(int seconds);      // apply; saved only when it changes
 int  attn_anim_get(void);
 void pace_marker_set(bool on);      // apply; saved only when it changes
 bool pace_marker_get(void);
+void chime_level_set(int pct);      // apply; saved only when it changes
+int  chime_level_get(void);

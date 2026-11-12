@@ -78,7 +78,11 @@ static volatile uint16_t param_fix_spent  = CONN_HANDLE_NONE;  // one per connec
 // RX writes land in rx_buf on the NimBLE host task (core 0); the loop parses
 // on core 1. Both sides copy under rx_lock, and the loop parses its own copy
 // (parse_buf), so a write never changes the text mid-parse.
-static char rx_buf[BLE_BUF_SIZE];
+// A few slots, so two writes landing in one loop pass (during a long
+// redraw) don't overwrite each other.
+#define RX_SLOTS 3
+static char rx_buf[RX_SLOTS][BLE_BUF_SIZE];
+static uint8_t rx_head = 0, rx_count = 0;   // under rx_lock
 static char parse_buf[BLE_BUF_SIZE];
 static portMUX_TYPE rx_lock = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool data_ready = false;
@@ -298,8 +302,12 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         std::string val = chr->getValue();
         size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
         portENTER_CRITICAL(&rx_lock);
-        memcpy(rx_buf, val.c_str(), len);
-        rx_buf[len] = '\0';
+        // Full: the oldest line gives way (the app resends every few seconds).
+        if (rx_count == RX_SLOTS) { rx_head = (rx_head + 1) % RX_SLOTS; rx_count--; }
+        char* slot = rx_buf[(rx_head + rx_count) % RX_SLOTS];
+        memcpy(slot, val.c_str(), len);
+        slot[len] = '\0';
+        rx_count++;
         data_ready = true;
         portEXIT_CRITICAL(&rx_lock);
         has_received_data = true;
@@ -337,6 +345,9 @@ void ble_init(void) {
     server = NimBLEDevice::createServer();
     static ServerCallbacks serverCb;
     server->setCallbacks(&serverCb);
+    // Advertising is ours to restart (need_advertise): NimBLE doing it on every
+    // disconnect would bring a bonded host straight back while the radio is off.
+    server->advertiseOnDisconnect(false);
 
     // --- HID keyboard service ---
     hid_dev = new NimBLEHIDDevice(server);
@@ -496,8 +507,14 @@ bool ble_has_data(void) {
 
 const char* ble_get_data(void) {
     portENTER_CRITICAL(&rx_lock);
-    memcpy(parse_buf, rx_buf, sizeof(parse_buf));
-    data_ready = false;
+    if (rx_count) {
+        memcpy(parse_buf, rx_buf[rx_head], sizeof(parse_buf));
+        rx_head = (rx_head + 1) % RX_SLOTS;
+        rx_count--;
+    } else {
+        parse_buf[0] = '\0';
+    }
+    data_ready = rx_count > 0;
     portEXIT_CRITICAL(&rx_lock);
     return parse_buf;
 }

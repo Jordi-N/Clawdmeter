@@ -14,6 +14,7 @@
 #define PWR_POLL_MS      50
 
 static XPowersPMU pmu;
+static bool       pmu_ok = false;   // begin() succeeded
 
 static int      cached_pct        = -1;
 static bool     cached_charging   = false;
@@ -31,6 +32,7 @@ void power_hal_init(void) {
         return;
     }
     Serial.println("AXP2101 init OK");
+    pmu_ok = true;
 
     pmu.enableBattDetection();
     pmu.enableBattVoltageMeasure();
@@ -72,11 +74,14 @@ void power_hal_tick(void) {
     }
     if (now - last_pwr_ms >= PWR_POLL_MS) {
         last_pwr_ms = now;
-        pmu.getIrqStatus();
-        if (pmu.isPekeyShortPressIrq())    pwr_pressed_flag  = true;
-        if (pmu.isPekeyLongPressIrq())     pwr_long_flag     = true;
-        if (pmu.isPekeyPositiveIrq())      pwr_released_flag = true;
-        pmu.clearIrqStatus();
+        // Read, and clear only when something fired: one I2C read per poll
+        // instead of a read and three writes (the bus is shared with touch).
+        if (pmu.getIrqStatus()) {
+            if (pmu.isPekeyShortPressIrq())    pwr_pressed_flag  = true;
+            if (pmu.isPekeyLongPressIrq())     pwr_long_flag     = true;
+            if (pmu.isPekeyPositiveIrq())      pwr_released_flag = true;
+            pmu.clearIrqStatus();
+        }
     }
 }
 
@@ -95,6 +100,7 @@ bool power_hal_pwr_long_pressed(void) {
 }
 
 bool power_hal_shutdown(void) {
+    if (!pmu_ok) return false;   // no PMU to ask: the app gets {"err":true}
     Serial.println("Power: shutting down (asked by the app)");
     Serial.flush();
     pmu.shutdown();

@@ -15,3 +15,6 @@ static const BoardCaps caps = {
 };
 
 const BoardCaps& board_caps(void) { return caps; }
+
+#include <Arduino.h>
+unsigned long board_hal_free_heap(void) { return ESP.getFreeHeap(); }

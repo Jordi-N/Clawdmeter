@@ -176,7 +176,7 @@ pub fn list_ports() -> Vec<EspPort> {
 }
 
 /// What running Clawdmeter firmware says about itself (`info` command).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct FirmwareInfo {
     /// PlatformIO env.
     pub env: String,
@@ -185,9 +185,22 @@ pub struct FirmwareInfo {
     /// Panel / board revision (may be empty).
     #[serde(default, deserialize_with = "string_or_number")]
     pub rev: String,
-    /// Link mode, e.g. `ble`.
+    /// The app's link as the device sees it: `usb` | `wifi` | `ble` | `none`
+    /// (older firmware always says `ble`).
     #[serde(default)]
     pub link: String,
+    /// Fork firmware, for diagnostics: seconds since boot.
+    #[serde(default)]
+    pub up: Option<u64>,
+    /// Free heap in bytes (0: the board can't tell).
+    #[serde(default)]
+    pub heap: Option<u64>,
+    /// Battery %, -1 without a gauge.
+    #[serde(default)]
+    pub bat: Option<i32>,
+    /// Charging.
+    #[serde(default)]
+    pub chg: Option<bool>,
 }
 
 fn string_or_number<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -704,12 +717,16 @@ mod tests {
                 env: "waveshare_amoled_18".into(),
                 ver: "1.9.0".into(),
                 rev: "co5300".into(),
-                link: "ble".into()
+                link: "ble".into(),
+                ..Default::default()
             }
         );
         assert!(parse_info_output("{\"ready\":true}\n").is_none());
         assert!(parse_info_output("garbage {\"env\":").is_none());
         assert_eq!(parse_info_output("x {\"env\":\"a\",\"ver\":\"1\",\"rev\":2}").unwrap().rev, "2");
+        let line = r#"{"env":"e","ver":"v2.6.0","link":"usb","up":3600,"heap":120000,"bat":80,"chg":true}"#;
+        let fork = parse_info_output(&format!("{line}\n")).unwrap();
+        assert_eq!((fork.up, fork.heap, fork.bat, fork.chg), (Some(3600), Some(120000), Some(80), Some(true)));
     }
 
     #[test]
@@ -732,12 +749,7 @@ mod tests {
     fn unconfirmed_flash_copy() {
         let e = DeviceError::NotConfirmed { expected: "waveshare_amoled_216".into(), found: None };
         assert!(e.to_string().starts_with("El firmware se escribió, pero la placa no respondió"));
-        let info = FirmwareInfo {
-            env: "waveshare_amoled_18".into(),
-            ver: "1.0".into(),
-            rev: String::new(),
-            link: String::new(),
-        };
+        let info = FirmwareInfo { env: "waveshare_amoled_18".into(), ver: "1.0".into(), ..Default::default() };
         let e = DeviceError::NotConfirmed { expected: "waveshare_amoled_216".into(), found: Some(info) };
         assert!(e.to_string().contains("firmware waveshare_amoled_18 en lugar de waveshare_amoled_216"));
     }

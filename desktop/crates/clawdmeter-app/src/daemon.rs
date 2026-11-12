@@ -20,7 +20,7 @@ use clawdmeter_core::engine::PollPlan;
 use clawdmeter_core::events::EventTail;
 use clawdmeter_core::probe;
 use clawdmeter_core::usage;
-use clawdmeter_core::wifi::{self, Connection, Power, Secret, Transport, WifiStatus};
+use clawdmeter_core::wifi::{self, Battery, Connection, Power, Secret, Transport, WifiStatus};
 use clawdmeter_core::{unix_now, ConfigFile, Engine, EngineStatus, HostClock, Paths, Settings, WriteKind};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -31,6 +31,12 @@ use crate::transport::{self, Link, TcpLink, UsbLink};
 const TICK: Duration = Duration::from_millis(500);
 /// Config re-read interval (s).
 const SETTINGS_EVERY: i64 = 5;
+/// Least time between two serial-port listings (s).
+const PORT_SCAN_EVERY: i64 = 3;
+/// Session lock check interval (s).
+const LOCK_CHECK_EVERY: i64 = 2;
+/// How long the session must stay locked before the device rests (s).
+const LOCK_DEBOUNCE: i64 = 10;
 /// Connection check interval (s).
 const LINK_CHECK_EVERY: i64 = 5;
 /// How long the device has to acknowledge a provisioning line (s). The
@@ -112,6 +118,10 @@ pub struct Status {
     pub claude: Option<PathBuf>,
     /// WiFi link details.
     pub wifi: WifiInfo,
+    /// The device's battery, as it last reported it on this link.
+    pub battery: Option<Battery>,
+    /// The device was rested because this computer is locked.
+    pub rested_for_lock: bool,
 }
 
 /// Handle held by the UI.
@@ -261,6 +271,17 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut link_written_at = 0;
     // The window's USB claim as last seen, to log when it starts and ends.
     let mut usb_was_claimed = false;
+    // Listing serial ports costs a SetupAPI walk on Windows: at most this often.
+    let mut ports_scanned_at = 0;
+    let mut battery: Option<Battery> = None;
+    // The link last seen at the end of a tick: a change releases held keys.
+    let mut last_transport: Option<Transport> = None;
+    // Session lock, debounced (a UAC prompt also hides the desktop briefly).
+    let mut lock_seen: Option<(bool, i64)> = None;
+    let mut locked = false;
+    // The rest line already sent on this link for the lock state.
+    let mut rest_sent: Option<bool> = None;
+    let mut lock_checked_at = 0;
     let mut wifi = WifiInfo::default();
     // The radio on/off line already sent on this link.
     let mut radio_sent: Option<bool> = None;
@@ -315,9 +336,11 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 Ok(Command::ProvisionWifi { ssid, pass }) => {
                     // Fresh: the key may have been written since the last re-read.
                     let s = Settings::load(&paths).unwrap_or_else(|_| engine.settings().clone());
+                    // Any link: over WiFi the device takes the new network and
+                    // reconnects to it.
                     let sent = match &link {
-                        Some(l @ (Link::Ble(_) | Link::Usb(_))) => provision(&paths, l, &s, &ssid, &pass).await,
-                        _ => Err("Conecta el aparato por USB o Bluetooth para enviarle la red.".into()),
+                        Some(l) => provision(&paths, l, &s, &ssid, &pass).await,
+                        None => Err("Conecta el aparato (USB, WiFi o Bluetooth) para enviarle la red.".into()),
                     };
                     wifi.send = Some(match sent {
                         Ok(()) => {
@@ -398,6 +421,12 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     DeviceEvent::Dismissed => {
                         log::info!("attention alert dismissed on the device");
                         engine.on_device_dismissed();
+                    }
+                    DeviceEvent::Battery(b) => {
+                        if battery.is_none_or(|old| old.low() != b.low()) && b.low() {
+                            log::info!("device battery low: {} %", b.pct);
+                        }
+                        battery = Some(b);
                     }
                     DeviceEvent::Wifi(st) => {
                         log::info!("device WiFi: {}", st.st);
@@ -605,7 +634,12 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         if connecting.is_none() {
             let current = link.as_ref().map(Link::transport);
             // Ports are listed only when USB would be tried.
-            let usb_port = if !usb_claimed && current != Some(Transport::Usb) && usb_retry.due(now) {
+            let usb_port = if !usb_claimed
+                && current != Some(Transport::Usb)
+                && usb_retry.due(now)
+                && now - ports_scanned_at >= PORT_SCAN_EVERY
+            {
+                ports_scanned_at = now;
                 clawdmeter_flash::device::list_ports().into_iter().next().map(|p| p.path)
             } else {
                 None
@@ -701,16 +735,64 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 }
             }
         }
-        // On USB the device knows the app is there only by its lines, and
-        // keeps Bluetooth off while they come: say so when there's nothing
-        // else to send.
-        if let Some(l @ Link::Usb(_)) = &link {
+        // On USB and WiFi the device knows the app is there only by its
+        // lines (it keeps Bluetooth off meanwhile and drops a silent host),
+        // and the app knows the device is there by its acks: say something
+        // when there's nothing else to send.
+        if let Some(l) = link.as_ref().filter(|l| l.transport() != Transport::Ble) {
             if now - link_written_at >= wifi::USB_HEARTBEAT_SECS {
                 match l.write(wifi::HEARTBEAT_LINE.as_bytes()).await {
                     Ok(()) => link_written_at = now,
-                    Err(e) => log::warn!("USB keepalive failed: {e}"),
+                    Err(e) => log::warn!("keepalive failed: {e}"),
                 }
             }
+        }
+
+        // Rest the device while this computer is locked (nobody at the desk:
+        // a lit AMOLED for nothing), wake it on unlock.
+        if now - lock_checked_at >= LOCK_CHECK_EVERY {
+            lock_checked_at = now;
+            if let Some(l) = crate::session::locked() {
+                match lock_seen {
+                    Some((was, _)) if was == l => {}
+                    _ => lock_seen = Some((l, now)),
+                }
+                if let Some((l, since)) = lock_seen {
+                    // Locking waits out a UAC prompt; unlocking is at once.
+                    if l != locked && (!l || now - since >= LOCK_DEBOUNCE) {
+                        locked = l;
+                        log::info!("session {}", if l { "locked" } else { "unlocked" });
+                    }
+                }
+            }
+        }
+        let rest = engine.settings().rest_on_lock && locked;
+        if let Some(l) = &link {
+            // Only a change is sent (and nothing while unlocked from the
+            // start), so the device's own rest/wake buttons keep working.
+            if rest_sent != Some(rest) && (rest || rest_sent.is_some()) {
+                let p = if rest { Power::Sleep } else { Power::Wake };
+                match l.write(p.line().as_bytes()).await {
+                    Ok(()) => {
+                        log::info!("device {} for the session lock", if rest { "rested" } else { "woken" });
+                        rest_sent = Some(rest);
+                    }
+                    Err(e) => log::warn!("device {}: {e}", p.as_str()),
+                }
+            }
+        }
+
+        // The link changed (dropped, or moved to another): a key held over
+        // the old one gets no release, so let it go here, and the battery
+        // and rest state are this link's.
+        let transport = link.as_ref().map(Link::transport);
+        if transport != last_transport {
+            crate::keys::release_all();
+            battery = None;
+            if rest_sent == Some(true) {
+                rest_sent = None; // a reconnected device is awake; rest it again
+            }
+            last_transport = transport;
         }
 
         wifi.fallback = wifi_ready && link.as_ref().is_some_and(|l| l.transport() == Transport::Ble);
@@ -723,6 +805,8 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             last_write_at,
             claude: claude.clone(),
             wifi: wifi.clone(),
+            battery,
+            rested_for_lock: rest_sent == Some(true),
         });
     }
 }

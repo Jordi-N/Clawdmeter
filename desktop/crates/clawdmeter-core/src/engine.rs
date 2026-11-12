@@ -154,6 +154,8 @@ pub struct Engine {
     sent_aa: Option<u16>,
     /// The pace marker the device last got (`pm`).
     sent_pm: Option<u8>,
+    sent_br: Option<u8>,
+    sent_vol: Option<u8>,
     last_event_ts: Option<i64>,
     /// Latest prompt or tool activity that names no configured account.
     unattributed_activity: Option<i64>,
@@ -199,6 +201,8 @@ impl Engine {
             sent_lv: None,
             sent_aa: None,
             sent_pm: None,
+            sent_br: None,
+            sent_vol: None,
             last_event_ts: None,
             unattributed_activity: None,
             claude_found: true,
@@ -305,6 +309,8 @@ impl Engine {
         self.sent_lv = None;
         self.sent_aa = None;
         self.sent_pm = None;
+        self.sent_br = None;
+        self.sent_vol = None;
         self.sent_ag = None;
         self.sent_ag_at = i64::MIN / 2;
         if self.active.is_some() || self.logged_out {
@@ -519,8 +525,15 @@ impl Engine {
         // A changed device setting goes out right away, like an event.
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
-        let prefs_changed =
-            self.sent_lv != Some(self.settings.liveliness) || self.sent_aa != Some(aa) || self.sent_pm != Some(pm);
+        // Brightness and volume go out only when they change, so the
+        // device's own button keeps working in between.
+        let br = self.settings.brightness.filter(|b| self.sent_br != Some(*b));
+        let vol = self.settings.chime_volume.filter(|v| self.sent_vol != Some(*v));
+        let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
+            || self.sent_aa != Some(aa)
+            || self.sent_pm != Some(pm)
+            || br.is_some()
+            || vol.is_some();
 
         let (mut payload, kind) = if self.logged_out {
             if !(self.fresh_poll || self.attention.pending()) {
@@ -558,6 +571,8 @@ impl Engine {
             p.lv = Some(self.settings.liveliness);
             p.aa = Some(aa);
             p.pm = Some(pm);
+            p.br = br;
+            p.vol = vol;
             (p, kind)
         };
 
@@ -614,6 +629,12 @@ impl Engine {
         }
         if let Some(pm) = w.payload.pm {
             self.sent_pm = Some(pm);
+        }
+        if let Some(br) = w.payload.br {
+            self.sent_br = Some(br);
+        }
+        if let Some(vol) = w.payload.vol {
+            self.sent_vol = Some(vol);
         }
     }
 
@@ -1266,6 +1287,21 @@ mod tests {
         assert!(write(&mut e, T0 + 3).is_none());
         e.on_connected();
         assert_eq!(write(&mut e, T0 + 4).unwrap().payload.pm, Some(1), "resent on a reconnect");
+    }
+
+    #[test]
+    fn brightness_and_volume_go_out_only_when_they_change() {
+        let mut e = Engine::new(settings(""));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let w = write(&mut e, T0).unwrap();
+        assert_eq!((w.payload.br, w.payload.vol), (None, None), "unset: the device keeps its own");
+        e.update_settings(settings("brightness = 1\nchime_volume = 60\n"));
+        let w = write(&mut e, T0 + 2).expect("a new setting is sent right away");
+        assert_eq!((w.payload.br, w.payload.vol), (Some(1), Some(60)));
+        e.request_refresh(T0 + 3);
+        e.on_poll_results(T0 + 200, vec![(PathBuf::from("/h/.claude"), Ok(reading(16)))]);
+        let w = write(&mut e, T0 + 200).unwrap();
+        assert_eq!((w.payload.br, w.payload.vol), (None, None), "not repeated: the PWR button still works");
     }
 
     #[test]

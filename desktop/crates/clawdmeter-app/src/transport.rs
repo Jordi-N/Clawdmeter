@@ -10,7 +10,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,12 @@ use tokio::sync::{mpsc, Mutex};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Bound on one write.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The fork firmware answers every line (an ack), and the app writes at least
+/// every `wifi::USB_HEARTBEAT_SECS`: a link with nothing back for this long is
+/// dead (the board lost power or the network), even if the socket or port
+/// still looks open.
+const SILENT_SECS: i64 = 45;
+
 /// How long an mDNS browse waits for the device to answer.
 const BROWSE_TIME: Duration = Duration::from_secs(3);
 
@@ -87,7 +93,18 @@ pub struct TcpLink {
     writer: Mutex<OwnedWriteHalf>,
     addr: SocketAddr,
     alive: Arc<AtomicBool>,
+    /// Unix second of the device's last line.
+    last_rx: Arc<AtomicI64>,
+    /// The reader task: aborted on close/drop, so a dead peer doesn't keep
+    /// it (and the socket) alive.
+    reader: tokio::task::JoinHandle<()>,
     health: WriteHealth,
+}
+
+impl Drop for TcpLink {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
 }
 
 impl std::fmt::Debug for TcpLink {
@@ -133,9 +150,11 @@ impl TcpLink {
         }
         let (tx, events) = mpsc::unbounded_channel();
         let alive = Arc::new(AtomicBool::new(true));
-        let up = alive.clone();
-        tokio::spawn(async move {
+        let last_rx = Arc::new(AtomicI64::new(clawdmeter_core::unix_now()));
+        let (up, seen) = (alive.clone(), last_rx.clone());
+        let reader = tokio::spawn(async move {
             while let Ok(Some(line)) = lines.next_line().await {
+                seen.store(clawdmeter_core::unix_now(), Ordering::Relaxed);
                 if let Some(ev) = line_event(&line) {
                     if tx.send(ev).is_err() {
                         break;
@@ -144,7 +163,8 @@ impl TcpLink {
             }
             up.store(false, Ordering::Relaxed);
         });
-        Ok((TcpLink { writer: Mutex::new(write), addr, alive, health: WriteHealth::default() }, events))
+        let link = TcpLink { writer: Mutex::new(write), addr, alive, last_rx, reader, health: WriteHealth::default() };
+        Ok((link, events))
     }
 
     /// Write one line (the newline is added here).
@@ -162,13 +182,17 @@ impl TcpLink {
         r
     }
 
-    /// The device hasn't closed the connection and writes go through.
+    /// The device hasn't closed the connection, writes go through and it
+    /// has answered lately.
     pub fn is_connected(&self) -> bool {
-        self.alive.load(Ordering::Relaxed) && !self.health.is_zombie()
+        self.alive.load(Ordering::Relaxed)
+            && !self.health.is_zombie()
+            && clawdmeter_core::unix_now() - self.last_rx.load(Ordering::Relaxed) < SILENT_SECS
     }
 
     /// Close the connection.
     pub async fn close(&self) {
+        self.reader.abort();
         let _ = self.writer.lock().await.shutdown().await;
     }
 
@@ -185,7 +209,17 @@ pub struct UsbLink {
     writer: std::sync::Mutex<LinkPort>,
     port: String,
     alive: Arc<AtomicBool>,
+    /// Unix second of the device's last line.
+    last_rx: Arc<AtomicI64>,
     health: WriteHealth,
+}
+
+/// Dropped without `close()` (a lost link): the reader thread still stops
+/// and lets go of the COM port, which only one process can hold.
+impl Drop for UsbLink {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
 }
 
 impl std::fmt::Debug for UsbLink {
@@ -255,13 +289,17 @@ impl UsbLink {
             ));
         }
         let alive = Arc::new(AtomicBool::new(true));
-        let up = alive.clone();
+        let last_rx = Arc::new(AtomicI64::new(clawdmeter_core::unix_now()));
+        let (up, seen) = (alive.clone(), last_rx.clone());
         std::thread::Builder::new().name("clawdmeter-usb".into()).spawn(move || {
             while up.load(Ordering::Relaxed) {
                 match reader.read(&mut buf) {
                     Ok(0) => {}
                     Ok(n) => {
                         for line in take_lines(&mut pending, &buf[..n]) {
+                            if is_ack(&line) {
+                                seen.store(clawdmeter_core::unix_now(), Ordering::Relaxed);
+                            }
                             if let Some(ev) = line_event(&line) {
                                 if tx.send(ev).is_err() {
                                     up.store(false, Ordering::Relaxed);
@@ -275,13 +313,23 @@ impl UsbLink {
             }
             up.store(false, Ordering::Relaxed);
         })?;
-        Ok((UsbLink { writer: std::sync::Mutex::new(writer), port, alive, health: WriteHealth::default() }, events))
+        let link = UsbLink {
+            writer: std::sync::Mutex::new(writer),
+            port,
+            alive,
+            last_rx,
+            health: WriteHealth::default(),
+        };
+        Ok((link, events))
     }
 
     /// Write one line (the newline is added here). Short and bounded by the
     /// port's timeout, so it runs inline.
     pub fn write(&self, data: &[u8]) -> io::Result<()> {
-        let mut line = Vec::with_capacity(data.len() + 1);
+        // A leading newline: if a timed-out write left half a line on the
+        // port, it ends there instead of garbling this one.
+        let mut line = Vec::with_capacity(data.len() + 2);
+        line.push(b'\n');
         line.extend_from_slice(data);
         line.push(b'\n');
         let r = match self.writer.lock() {
@@ -292,9 +340,13 @@ impl UsbLink {
         r
     }
 
-    /// The port is still there and writes go through.
+    /// The port is still there, writes go through and the firmware has
+    /// acked lately (its log lines don't count: they say nothing about the
+    /// app's lines being read).
     pub fn is_connected(&self) -> bool {
-        self.alive.load(Ordering::Relaxed) && !self.health.is_zombie()
+        self.alive.load(Ordering::Relaxed)
+            && !self.health.is_zombie()
+            && clawdmeter_core::unix_now() - self.last_rx.load(Ordering::Relaxed) < SILENT_SECS
     }
 
     /// Let go of the port: the reader stops within one read timeout (100 ms)

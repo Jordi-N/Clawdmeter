@@ -77,6 +77,21 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
     JsonVariant pm = doc["pm"];
     d.pace_marker = pm.isNull() ? -1 : (int8_t)((pm | 0) ? 1 : 0);
 
+    JsonVariant br = doc["br"];
+    if (br.isNull()) {
+        d.brightness = -1;
+    } else {
+        int v = br | 2;
+        d.brightness = (int8_t)(v < 0 ? 0 : v > 3 ? 3 : v);
+    }
+    JsonVariant vol = doc["vol"];
+    if (vol.isNull()) {
+        d.chime_level = -1;
+    } else {
+        int v = vol | 100;
+        d.chime_level = (int8_t)(v < 0 ? 0 : v > 100 ? 100 : v);
+    }
+
     d.ok = doc["ok"] | false;
     d.valid = true;
     *out = d;

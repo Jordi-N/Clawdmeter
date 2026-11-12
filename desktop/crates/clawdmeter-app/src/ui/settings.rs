@@ -145,6 +145,62 @@ fn wifi_line(snap: Option<&StatusSnapshot>, s: &Settings) -> (Tone, String) {
     }
 }
 
+/// "Batería 80 % · cargando".
+fn battery_text(b: clawdmeter_core::wifi::Battery) -> String {
+    let state = if b.chg {
+        " · cargando"
+    } else if b.usb {
+        " · con USB"
+    } else if b.low() {
+        " · baja"
+    } else {
+        ""
+    };
+    format!("Batería {} %{state}", b.pct)
+}
+
+/// The Device page's diagnostics, one fact per line.
+fn diagnostics_text(snap: Option<&StatusSnapshot>, info: Option<&FirmwareInfo>, s: &Settings) -> String {
+    let now = clawdmeter_core::unix_now();
+    let mut out = vec![format!("App: {}", crate::version())];
+    match snap {
+        None => out.push("Daemon: no se está ejecutando".into()),
+        Some(sn) => {
+            let via = sn.via().unwrap_or("ninguno");
+            let addr = sn.wifi_addr.as_deref().map(|a| format!(" ({a})")).unwrap_or_default();
+            out.push(format!("Enlace: {} por {via}{addr}", sn.link));
+            out.push(format!(
+                "Último envío: {}",
+                sn.last_write_at.map(|t| format!("hace {} s", (now - t).max(0))).unwrap_or_else(|| "nunca".into())
+            ));
+            if let Some(w) = &sn.wifi {
+                out.push(format!("WiFi del aparato: {} {}", w.st, w.ip.as_deref().unwrap_or("")).trim_end().to_owned());
+            }
+            if let Some(b) = sn.battery {
+                out.push(battery_text(b));
+            }
+            if sn.rested_for_lock {
+                out.push("En reposo: ordenador bloqueado".into());
+            }
+        }
+    }
+    out.push(format!(
+        "Conexión elegida: {}{}",
+        s.connection.as_str(),
+        if s.wifi_key.is_some() { " (clave WiFi guardada)" } else { "" }
+    ));
+    if let Some(i) = info {
+        out.push(format!("Firmware: {} {} · enlace visto por el aparato: {}", i.env, i.ver, i.link));
+        if let Some(up) = i.up {
+            out.push(format!("Encendido hace: {} h {} min", up / 3600, up / 60 % 60));
+        }
+        if let Some(heap) = i.heap.filter(|h| *h > 0) {
+            out.push(format!("Memoria libre: {} KB", heap / 1024));
+        }
+    }
+    out.join("\n")
+}
+
 /// What the device says about its own WiFi.
 fn device_wifi_text(w: &clawdmeter_core::wifi::WifiStatus) -> String {
     let net = w.ssid.as_deref().map(|s| format!(" a {s}")).unwrap_or_default();
@@ -277,7 +333,9 @@ impl SettingsView {
     /// Put `page` on screen (`embedded`: inside the setup wizard). Other
     /// pages hide this view.
     pub fn show(&mut self, page: Page, embedded: bool, cx: &mut Context<Self>) {
-        self.visible = matches!(page, Page::Device | Page::Accounts | Page::Hooks | Page::Settings);
+        // `Setup`, embedded: the wizard's connect step shows the WiFi form.
+        let wizard_wifi = embedded && page == Page::Setup;
+        self.visible = matches!(page, Page::Device | Page::Accounts | Page::Hooks | Page::Settings) || wizard_wifi;
         if !self.visible {
             return;
         }
@@ -287,7 +345,7 @@ impl SettingsView {
         if page == Page::Device && self.usb && !self.device.probing && self.device.port.is_none() {
             self.probe_device(cx);
         }
-        if page == Page::Device && !self.wifi_prefilled {
+        if matches!(page, Page::Device | Page::Setup) && !self.wifi_prefilled {
             self.wifi_prefilled = true;
             match self.settings.wifi_ssid.clone() {
                 Some(s) => self.wifi_ssid = s,
@@ -374,15 +432,20 @@ impl SettingsView {
 
     fn tick(&mut self, cx: &mut Context<Self>) {
         self.ticks += 1;
+        // Hidden: nothing to refresh (show() reloads on the way in).
+        if !self.visible {
+            return;
+        }
         self.snap = live_status(&self.paths);
-        // Pick up hand edits and other windows' changes every few seconds,
-        // but never under an open diff preview.
-        if self.ticks.is_multiple_of(6) && self.preview.is_none() {
+        // Pick up hand edits and other windows' changes every 10 s (a reload
+        // also asks the registry about Start at login, a process each on
+        // Windows), but never under an open diff preview.
+        if self.ticks.is_multiple_of(20) && self.preview.is_none() {
             self.reload();
         }
         // Notice a board being plugged in (only while the Device page is up,
         // so it never competes with the flasher for the port).
-        let on_device = self.visible && self.page == Page::Device;
+        let on_device = self.page == Page::Device;
         if self.usb && on_device && self.ticks.is_multiple_of(4) && !self.device.probing && self.device.port.is_none() {
             if let Some(p) = device::list_ports().into_iter().next() {
                 self.device.port = Some(p.path);
@@ -412,7 +475,16 @@ impl SettingsView {
                 let port = device::list_ports().into_iter().next().map(|p| p.path);
                 let Some(port) = port else { return (None, None) };
                 ipc::claim_usb(&paths, 5);
-                let info = device::probe_info(&port, Duration::from_millis(1500)).ok().flatten();
+                let mut tries = 0;
+                let info = loop {
+                    match device::probe_info(&port, Duration::from_millis(1500)) {
+                        Err(device::DeviceError::Busy { .. }) if tries < 6 => {
+                            tries += 1;
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
+                        r => break r.ok().flatten(),
+                    }
+                };
                 (Some(port), info)
             },
             |v, (port, info), _| {
@@ -670,6 +742,9 @@ impl SettingsView {
                 )
                 .child(div().flex().flex_wrap().gap(px(6.)).child(pill(t, link, link_tone)))
                 .child(div().text_size(px(13.)).text_color(t.dim).child(firmware))
+                .when_some(snap.as_ref().and_then(|s| s.battery).map(battery_text), |d, b| {
+                    d.child(div().text_size(px(13.)).text_color(t.dim).child(b))
+                })
                 .child(div().text_size(px(13.)).text_color(t.mute).child(usb))
                 .child(div().flex().pt(px(4.)).child(button(
                     t,
@@ -857,7 +932,8 @@ impl SettingsView {
             pane = pane.child(notice(t, *tone, msg.clone()));
         }
         pane = self.power_section(t, pane, cx);
-        self.wifi_section(t, window, pane, cx)
+        let pane = self.wifi_section(t, window, pane, cx);
+        self.diagnostics_section(t, pane)
     }
 
     /// Rest, wake and power off, sent over whatever link the device is on.
@@ -891,12 +967,61 @@ impl SettingsView {
                 });
             },
         );
+        let (me2, me3, me4) = (cx.entity().downgrade(), cx.entity().downgrade(), cx.entity().downgrade());
+        let on_lock = self.settings.rest_on_lock;
         pane.child(div().pt(px(18.)).child(subheading(t, "Encendido")))
             .child(field(
                 t,
                 "Reposo",
                 "Apaga la pantalla. Vuelve con Despertar, un botón o un toque en la pantalla.",
                 rest,
+            ))
+            .child(field(
+                t,
+                "Reposo al bloquear el ordenador",
+                "Con el ordenador bloqueado la pantalla se apaga sola y vuelve al desbloquearlo (Windows).",
+                toggle(t, "rest-on-lock", on_lock, true, move |_, _, cx| {
+                    let _ = me2.update(cx, |v, cx| {
+                        v.save(|s, _| s.rest_on_lock = !on_lock);
+                        cx.notify();
+                    });
+                }),
+            ))
+            .child(field(
+                t,
+                "Brillo",
+                "Auto deja el que elijas con el botón del medio.",
+                segmented(
+                    t,
+                    "brightness",
+                    &[(None, "Auto"), (Some(0), "1"), (Some(1), "2"), (Some(2), "3"), (Some(3), "4")],
+                    &self.settings.brightness,
+                    true,
+                    move |b, _, cx| {
+                        let _ = me3.update(cx, |v, cx| {
+                            v.save(|s, _| s.brightness = b);
+                            cx.notify();
+                        });
+                    },
+                ),
+            ))
+            .child(field(
+                t,
+                "Volumen del aviso",
+                "Lo fuerte que suena el aviso en el aparato.",
+                segmented(
+                    t,
+                    "chime-volume",
+                    &[(None, "Auto"), (Some(25), "25 %"), (Some(50), "50 %"), (Some(75), "75 %"), (Some(100), "100 %")],
+                    &self.settings.chime_volume,
+                    true,
+                    move |c, _, cx| {
+                        let _ = me4.update(cx, |v, cx| {
+                            v.save(|s, _| s.chime_volume = c);
+                            cx.notify();
+                        });
+                    },
+                ),
             ))
             .child(field(
                 t,
@@ -908,6 +1033,27 @@ impl SettingsView {
                 },
                 off,
             ))
+    }
+
+    /// What the app and the device know about the link, for "why is it on
+    /// WiFi?" questions, with a button that copies it all.
+    fn diagnostics_section(&self, t: &Theme, pane: gpui::Div) -> gpui::Div {
+        let text = diagnostics_text(self.snap.as_ref(), self.device.info.as_ref(), &self.settings);
+        let copy = text.clone();
+        let mut lines = div().flex().flex_col().gap(px(2.));
+        for l in text.lines() {
+            lines = lines.child(div().font_family(FONT_MONO).text_size(px(12.)).text_color(t.dim).child(l.to_owned()));
+        }
+        pane.child(div().pt(px(18.)).child(subheading(t, "Diagnóstico")))
+            .child(card(t).p(px(14.)).child(lines))
+            .child(div().flex().pt(px(8.)).child(button(
+                t,
+                "copy-diagnostics",
+                "Copiar diagnóstico",
+                ButtonKind::Small,
+                true,
+                move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy.clone())),
+            )))
     }
 
     /// The Device page's WiFi section: the link choice, its state, and the
@@ -954,7 +1100,7 @@ impl SettingsView {
             pass_box,
         ));
         let via = snap.filter(|s| s.link == "connected").and_then(|s| s.transport);
-        let can_send = matches!(via, Some(Transport::Ble | Transport::Usb));
+        let can_send = via.is_some();
         let ready = can_send && !self.wifi_ssid.trim().is_empty();
         let (p, ssid, pass) = (self.paths.clone(), self.wifi_ssid.trim().to_owned(), self.wifi_pass.clone());
         pane = pane.child(field(
@@ -963,7 +1109,8 @@ impl SettingsView {
             match via {
                 Some(Transport::Usb) => "Le pasa la red por USB. Usa WiFi cuando desconectes el cable.",
                 Some(Transport::Ble) => "Le pasa la red por Bluetooth. Después usa WiFi en cuanto la encuentra.",
-                _ => "Hace falta que el aparato esté conectado por USB o Bluetooth.",
+                Some(Transport::Wifi) => "Le pasa la red nueva por la WiFi actual; se reconecta a la nueva.",
+                None => "Hace falta que el aparato esté conectado (USB, WiFi o Bluetooth).",
             },
             button(t, "wifi-send", "Enviar al aparato", ButtonKind::Small, ready, move |_, _, _| {
                 command(&p, AppCommand::WifiSend { ssid: ssid.clone(), pass: Secret(pass.clone()) })
@@ -1724,6 +1871,7 @@ impl Render for SettingsView {
             Page::Accounts => self.accounts_pane(&t, cx),
             Page::Hooks => self.hooks_pane(&t, cx),
             Page::Settings => self.settings_pane(&t, cx),
+            Page::Setup => self.wifi_section(&t, window, div().flex().flex_col().gap(px(6.)), cx),
             _ => self.device_pane(&t, window, cx),
         };
         if let Some(e) = self.config_error.clone().or_else(|| self.notice.as_ref().map(|(_, m)| m.clone())) {

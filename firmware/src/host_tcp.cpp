@@ -16,6 +16,10 @@
 #endif
 
 #define AUTH_TIMEOUT_MS 3000
+// The app writes at least every 15 s (a {"hb":1} when idle): a silent client
+// is gone (the laptop slept or left the network) and is dropped, so the
+// device stops counting it as its host and turns Bluetooth back on.
+#define IDLE_TIMEOUT_MS 45000
 
 struct TcpPeer {
     int fd;
@@ -135,6 +139,7 @@ static bool on_pending_line(const char* line, void*) {
     want_auth[0] = '\0';
     close_client(&active);
     active = pending;          // the rest of this read is already its data
+    active.since_ms = millis();
     just_promoted = true;
     pending.fd = -1;
     linebuf_reset(&pending.lb);
@@ -143,6 +148,7 @@ static bool on_pending_line(const char* line, void*) {
 }
 
 static bool on_active_line(const char* line, void*) {
+    active.since_ms = millis();   // for the active client: its last line
     tick_on_line(line);
     return active.fd >= 0;     // the handler may have dropped the client
 }
@@ -190,6 +196,9 @@ void tcp_host_tick(const char* key, void (*on_line)(const char* line)) {
     }
     if (active.fd >= 0 && !pump(&active, on_active_line)) {
         Serial.println("WiFi: TCP host disconnected");
+        close_client(&active);
+    } else if (active.fd >= 0 && millis() - active.since_ms >= IDLE_TIMEOUT_MS) {
+        Serial.println("WiFi: TCP host silent for 45 s, dropping it");
         close_client(&active);
     }
 }

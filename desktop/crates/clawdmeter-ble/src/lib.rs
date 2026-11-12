@@ -60,7 +60,7 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-pub use clawdmeter_core::wifi::WifiStatus;
+pub use clawdmeter_core::wifi::{Battery, WifiStatus};
 use clawdmeter_core::wifi::{parse_device_line, DeviceLine};
 pub use clawdmeter_core::DEVICE_NAME;
 
@@ -494,6 +494,8 @@ pub enum DeviceEvent {
     Dismissed,
     /// TX `{"wifi":{...}}`: its WiFi state (fork firmware only).
     Wifi(WifiStatus),
+    /// `{"bat":{...}}`: the device's battery (fork firmware).
+    Battery(Battery),
     /// A button for the app to type on this computer (USB/WiFi links only).
     Key {
         /// `space` | `shift_tab`.
@@ -526,6 +528,7 @@ pub fn line_event(text: &str) -> Option<DeviceEvent> {
         DeviceLine::Dismissed => Some(DeviceEvent::Dismissed),
         DeviceLine::Wifi(s) => Some(DeviceEvent::Wifi(s)),
         DeviceLine::Key { name, down } => Some(DeviceEvent::Key { name, down }),
+        DeviceLine::Battery(b) => Some(DeviceEvent::Battery(b)),
         DeviceLine::AuthOk | DeviceLine::Challenge { .. } => None,
     }
 }
@@ -728,10 +731,28 @@ async fn bonded_by_address(adapter: &Adapter, cached: Option<&str>) -> Vec<Candi
     out
 }
 
+/// [`windows_pnp_lookup`], remembered for 10 minutes: each lookup starts a
+/// PowerShell (about a second of CPU), and the table rarely changes.
+#[cfg(windows)]
+fn windows_pnp_address() -> Option<String> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, mac)) = last.as_ref() {
+        if at.elapsed() < Duration::from_secs(600) {
+            return mac.clone();
+        }
+    }
+    let mac = windows_pnp_lookup();
+    *last = Some((Instant::now(), mac.clone()));
+    mac
+}
+
 /// The bonded Clawdmeter's MAC from the Windows PnP table (the Windows
 /// daemon's `Get-PnpDevice` lookup). `None` on any failure.
 #[cfg(windows)]
-fn windows_pnp_address() -> Option<String> {
+fn windows_pnp_lookup() -> Option<String> {
     use std::os::windows::process::CommandExt;
     let script = format!(
         "Get-PnpDevice -Class Bluetooth -ErrorAction SilentlyContinue | \

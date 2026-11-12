@@ -7,7 +7,7 @@
 //! Space is repeated here like a keyboard would.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Before the first repeat, as a keyboard waits.
@@ -15,8 +15,19 @@ const REPEAT_DELAY: Duration = Duration::from_millis(400);
 /// Between repeats (about 30 per second).
 const REPEAT_EVERY: Duration = Duration::from_millis(33);
 
-/// The held key's repeat thread, stopped by clearing the flag.
-static HELD: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+/// The key held down on this computer, and its repeat thread's flag.
+struct Held {
+    keys: &'static [u16],
+    repeat: Arc<AtomicBool>,
+}
+
+/// Every press, release and repeat happens under this lock, so a repeat
+/// can't land after the key-up.
+static HELD: Mutex<Option<Held>> = Mutex::new(None);
+
+fn held() -> MutexGuard<'static, Option<Held>> {
+    HELD.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Virtual-key codes for a device button, modifiers first: `space` and
 /// `shift_tab`.
@@ -28,31 +39,59 @@ fn keys_for(name: &str) -> Option<&'static [u16]> {
     }
 }
 
+/// Release whatever key is held. Called on every press and release, and by
+/// the daemon when the link drops: a release that never arrives must not
+/// leave Space repeating into the focused window.
+pub fn release_all() {
+    let mut h = held();
+    if let Some(k) = h.take() {
+        k.repeat.store(false, Ordering::Relaxed);
+        imp::send(k.keys, false);
+    }
+}
+
 /// Press or release a device button's key on this computer.
 pub fn send(name: &str, down: bool) {
     let Some(keys) = keys_for(name) else {
         log::warn!("unknown key {name:?} from the device");
         return;
     };
-    if let Some(flag) = HELD.lock().ok().and_then(|mut h| h.take()) {
-        flag.store(false, Ordering::Relaxed);
+    let mut h = held();
+    let was = h.take();
+    if let Some(k) = &was {
+        k.repeat.store(false, Ordering::Relaxed);
+        imp::send(k.keys, false);
     }
-    imp::send(keys, down);
-    if down && name == "space" {
-        let flag = Arc::new(AtomicBool::new(true));
-        if let Ok(mut h) = HELD.lock() {
-            *h = Some(flag.clone());
+    if !down {
+        // A release for a key that wasn't held (it was let go above, or the
+        // press was lost): send it anyway, it's harmless.
+        if was.is_none_or(|k| k.keys != keys) {
+            imp::send(keys, false);
         }
-        let spawned = std::thread::Builder::new().name("clawdmeter-key-repeat".into()).spawn(move || {
-            std::thread::sleep(REPEAT_DELAY);
-            while flag.load(Ordering::Relaxed) {
+        return;
+    }
+    imp::send(keys, true);
+    let repeat = Arc::new(AtomicBool::new(true));
+    *h = Some(Held { keys, repeat: repeat.clone() });
+    drop(h);
+    if name != "space" {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("clawdmeter-key-repeat".into()).spawn(move || {
+        std::thread::sleep(REPEAT_DELAY);
+        loop {
+            {
+                let _h = held();
+                if !repeat.load(Ordering::Relaxed) {
+                    break;
+                }
                 imp::send(keys, true);
-                std::thread::sleep(REPEAT_EVERY);
             }
-        });
-        if let Err(e) = spawned {
-            log::warn!("key repeat: {e}");
+            std::thread::sleep(REPEAT_EVERY);
         }
+    });
+    if let Err(e) = spawned {
+        log::warn!("key repeat: {e}");
     }
 }
 
