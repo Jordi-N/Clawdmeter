@@ -330,9 +330,11 @@ impl UsbLink {
     fn open_blocking(port: String) -> io::Result<(UsbLink, DeviceEvents)> {
         let (mut reader, mut writer) =
             clawdmeter_flash::device::open_link(&port).map_err(|e| io::Error::other(e.to_string()))?;
-        // The leading newline ends whatever the port held before.
+        // The leading newline ends whatever the port held before. No flush()
+        // on this link: on Windows it waits, unbounded, until the board has
+        // taken every byte (seen: 2-7 s, with the daemon blocked); write_all
+        // is bounded by the port's 100 ms timeout.
         writer.write_all(format!("\n{HEARTBEAT_LINE}\n").as_bytes())?;
-        writer.flush()?;
         let (tx, events) = mpsc::unbounded_channel();
         let mut pending = Vec::new();
         let mut buf = [0u8; 512];
@@ -367,7 +369,6 @@ impl UsbLink {
         // Uptime and reset reason in the log: tells a board that rebooted
         // from one that only lost the link.
         writer.write_all(b"info\n")?;
-        writer.flush()?;
         let alive = Arc::new(AtomicBool::new(true));
         let last_rx = Arc::new(AtomicI64::new(clawdmeter_core::unix_now()));
         let info = Arc::new(std::sync::Mutex::new(first_info));
@@ -440,7 +441,8 @@ impl UsbLink {
         line.push(b'\n');
         let start = Instant::now();
         let r = match self.writer.lock() {
-            Ok(mut w) => w.write_all(&line).and_then(|()| w.flush()),
+            // No flush(): see open_blocking.
+            Ok(mut w) => w.write_all(&line),
             Err(_) => Err(io::Error::other("USB writer poisoned")),
         };
         let took = start.elapsed();
