@@ -728,7 +728,8 @@ mod tests {
         assert!(parse_info_output("{\"ready\":true}\n").is_none());
         assert!(parse_info_output("garbage {\"env\":").is_none());
         assert_eq!(parse_info_output("x {\"env\":\"a\",\"ver\":\"1\",\"rev\":2}").unwrap().rev, "2");
-        let line = r#"{"env":"e","ver":"v2.6.0","link":"usb","up":3600,"heap":120000,"rst":"panic","bat":80,"chg":true}"#;
+        let line =
+            r#"{"env":"e","ver":"v2.6.0","link":"usb","up":3600,"heap":120000,"rst":"panic","bat":80,"chg":true}"#;
         let fork = parse_info_output(&format!("{line}\n")).unwrap();
         assert_eq!((fork.up, fork.heap, fork.bat, fork.chg), (Some(3600), Some(120000), Some(80), Some(true)));
         assert_eq!(fork.rst.as_deref(), Some("panic"));
