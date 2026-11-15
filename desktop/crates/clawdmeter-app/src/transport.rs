@@ -36,7 +36,31 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// still looks open.
 const SILENT_SECS: i64 = 45;
 /// A USB write slower than this is logged: the port's driver is struggling.
-const SLOW_WRITE: Duration = Duration::from_secs(1);
+const SLOW_WRITE: Duration = Duration::from_millis(500);
+/// A USB line that isn't through by then fails: each attempt is bounded by
+/// the port's 100 ms timeout, but a board taking a few bytes at a time kept
+/// `write_all` going for 2-9 s with the daemon blocked.
+const USB_WRITE_LIMIT: Duration = Duration::from_secs(1);
+
+/// Write all of `buf` within `limit`, retrying the port's timeouts.
+fn write_within(w: &mut impl Write, buf: &[u8], limit: Duration) -> io::Result<()> {
+    let end = Instant::now() + limit;
+    let mut rest = buf;
+    while !rest.is_empty() {
+        if Instant::now() >= end {
+            let (sent, ms) = (buf.len() - rest.len(), limit.as_millis());
+            let msg = format!("the board took {sent} of {} bytes in {ms} ms", buf.len());
+            return Err(io::Error::new(io::ErrorKind::TimedOut, msg));
+        }
+        match w.write(rest) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => rest = &rest[n..],
+            Err(e) if matches!(e.kind(), io::ErrorKind::Interrupted | io::ErrorKind::TimedOut) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
 
 /// How long an mDNS browse waits for the device to answer.
 const BROWSE_TIME: Duration = Duration::from_secs(3);
@@ -332,9 +356,9 @@ impl UsbLink {
             clawdmeter_flash::device::open_link(&port).map_err(|e| io::Error::other(e.to_string()))?;
         // The leading newline ends whatever the port held before. No flush()
         // on this link: on Windows it waits, unbounded, until the board has
-        // taken every byte (seen: 2-7 s, with the daemon blocked); write_all
-        // is bounded by the port's 100 ms timeout.
-        writer.write_all(format!("\n{HEARTBEAT_LINE}\n").as_bytes())?;
+        // taken every byte (seen: 2-7 s, with the daemon blocked). Writes here
+        // are bounded by USB_WRITE_LIMIT.
+        write_within(&mut writer, format!("\n{HEARTBEAT_LINE}\n").as_bytes(), USB_WRITE_LIMIT)?;
         let (tx, events) = mpsc::unbounded_channel();
         let mut pending = Vec::new();
         let mut buf = [0u8; 512];
@@ -368,7 +392,7 @@ impl UsbLink {
         }
         // Uptime and reset reason in the log: tells a board that rebooted
         // from one that only lost the link.
-        writer.write_all(b"info\n")?;
+        write_within(&mut writer, b"info\n", USB_WRITE_LIMIT)?;
         let alive = Arc::new(AtomicBool::new(true));
         let last_rx = Arc::new(AtomicI64::new(clawdmeter_core::unix_now()));
         let info = Arc::new(std::sync::Mutex::new(first_info));
@@ -442,7 +466,7 @@ impl UsbLink {
         let start = Instant::now();
         let r = match self.writer.lock() {
             // No flush(): see open_blocking.
-            Ok(mut w) => w.write_all(&line),
+            Ok(mut w) => write_within(&mut *w, &line, USB_WRITE_LIMIT),
             Err(_) => Err(io::Error::other("USB writer poisoned")),
         };
         let took = start.elapsed();
@@ -589,6 +613,30 @@ pub fn ssid_from_netsh(out: &str) -> Option<String> {
 #[cfg(test)]
 mod board_log_tests {
     use super::*;
+
+    /// Takes one byte per call, or times out on every call.
+    struct Trickle(bool);
+    impl Write for Trickle {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.0 {
+                Ok(buf.len().min(1))
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+                Err(io::ErrorKind::TimedOut.into())
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn usb_writes_are_bounded() {
+        assert!(write_within(&mut Trickle(true), b"abc", Duration::from_secs(1)).is_ok());
+        let e = write_within(&mut Trickle(false), b"abc", Duration::from_millis(30)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(e.to_string(), "the board took 0 of 3 bytes in 30 ms");
+    }
 
     #[test]
     fn board_lines_are_capped_per_minute() {

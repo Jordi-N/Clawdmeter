@@ -15,6 +15,7 @@ void delay(unsigned long ms);
 class SimSerial {
 public:
     void begin(unsigned long baud) { (void)baud; }
+    size_t setRxBufferSize(size_t n) { return n; }
     // Fed by SIM_CMDS (sim_platform.cpp) so headless runs can type serial
     // commands (`clawd lurk`, `screenshot`, ...) at scripted times.
     int  available(void);

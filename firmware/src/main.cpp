@@ -304,6 +304,10 @@ static void check_serial_cmd() {
 extern "C" void board_init(void);
 
 void setup() {
+    // Room for two whole app lines (CMD_BUF_SIZE each). The default is
+    // 256 B, and the S3's USB driver (HWCDC) drops the rest of a packet when
+    // its queue is full: a payload longer than that arrived cut (`perr`).
+    Serial.setRxBufferSize(2 * CMD_BUF_SIZE);
     Serial.begin(115200);
     delay(300);
     Serial.println("{\"ready\":true}");
