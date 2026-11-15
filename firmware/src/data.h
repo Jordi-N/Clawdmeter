@@ -20,6 +20,7 @@ struct UsageData {
     char reset_date[12];     // formatted reset date e.g. "Jul 1" (Enterprise)
     long clock_epoch;        // local wall-clock epoch (s) from the app; 0 = not provided
     int  clock_fmt;          // 12 or 24 (hour format from the app); defaults to 24
+    long local_epoch;        // `lt`: local wall clock on every write (fork app), 0 = absent
     // ---- Fast clock (Claude Code hooks via the app). All optional: an older
     // app sends none of them and the fields read as "absent" below, which
     // the signal logic treats exactly like "no hooks installed".

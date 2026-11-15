@@ -100,6 +100,11 @@ pub struct Payload {
     /// only when it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vol: Option<u8>,
+    /// Fork only: local wall-clock epoch, like `t` but on every usage write
+    /// whatever the `clock` setting, so the device can print the reset's
+    /// clock time ("Reinicio 4h 41m · 18:00") without showing a title clock.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lt: Option<i64>,
     /// Fork only: Claude Code sessions and their subagents for the device's
     /// Agentes page ([`crate::agents`]). Alone (see [`Payload::agents`]) it is
     /// written without `ok`, which the firmware reads as agents-only.
@@ -110,7 +115,7 @@ pub struct Payload {
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es", "n",
-    "rp", "lv", "aa", "pm", "br", "vol", "ag",
+    "rp", "lv", "aa", "pm", "br", "vol", "lt", "ag",
 ];
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
@@ -547,6 +552,7 @@ mod tests {
             pm: Some(1),
             br: Some(2),
             vol: Some(80),
+            lt: Some(6),
             ag: Some(serde_json::json!([])),
         };
         let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&pl.to_json()).unwrap();

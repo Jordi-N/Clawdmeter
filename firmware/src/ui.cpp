@@ -219,15 +219,30 @@ static void place_pace_tick(lv_obj_t* tick, float elapsed_pct) {
 
 // `none`: what a missing reset time means (-1 in the payload): the session
 // window hasn't started, the weekly one is unknown.
-static void format_reset_time(int mins, char* buf, size_t len, const char* none) {
+// "Reinicio 4h 41m", plus " · 18:00" when the app sent the local time
+// (`lt`) and the card has room; a reset a day or more away also names the
+// weekday (" · mié 18:00").
+static void format_reset_time(int mins, const UsageData* d, char* buf, size_t len, const char* none) {
     if (mins < 0) {
         snprintf(buf, len, "%s", none);
-    } else if (mins < 60) {
-        snprintf(buf, len, "Reinicio %dm", mins);
-    } else if (mins < 1440) {
-        snprintf(buf, len, "Reinicio %dh %dm", mins / 60, mins % 60);
+        return;
+    }
+    int n;
+    if (mins < 60) n = snprintf(buf, len, "Reinicio %dm", mins);
+    else if (mins < 1440) n = snprintf(buf, len, "Reinicio %dh %dm", mins / 60, mins % 60);
+    else n = snprintf(buf, len, "Reinicio %dd %dh", mins / 1440, (mins % 1440) / 60);
+    if (d->local_epoch <= 0 || !L.reset_clock || n < 0 || (size_t)n >= len) return;
+    static const char* const DAYS[7] = { "dom", "lun", "mar", "mié", "jue", "vie", "sáb" };
+    const time_t at = (time_t)((d->local_epoch + (long)mins * 60 + 30) / 60 * 60);
+    struct tm t;
+    gmtime_r(&at, &t);   // the epoch is already local wall-clock
+    char day[8] = "";
+    if (mins >= 1440) snprintf(day, sizeof(day), "%s ", DAYS[t.tm_wday]);
+    if (d->clock_fmt == 12) {
+        const int h = t.tm_hour % 12 ? t.tm_hour % 12 : 12;
+        snprintf(buf + n, len - n, " · %s%d:%02d %s", day, h, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
     } else {
-        snprintf(buf, len, "Reinicio %dd %dh", mins / 1440, (mins % 1440) / 60);
+        snprintf(buf + n, len - n, " · %s%02d:%02d", day, t.tm_hour, t.tm_min);
     }
 }
 
@@ -739,6 +754,9 @@ void ui_update(const UsageData* data) {
     }
 
     int s_pct = (int)(data->session_pct + 0.5f);
+    // Anthropic reports a little over 100 % once the limit is hit (the
+    // request in flight still counts): the meter tops out at 100 %.
+    if (!data->enterprise && s_pct > 100) s_pct = 100;
 
     if (data->enterprise) {
         // Spending box: big number-only label + small "%" symbol + desc + pace
@@ -777,7 +795,7 @@ void ui_update(const UsageData* data) {
                         LV_ALIGN_OUT_RIGHT_TOP, 4, 12);
     } else {
         lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-        format_reset_time(data->session_reset_mins, buf, sizeof(buf), "Sin empezar");
+        format_reset_time(data->session_reset_mins, data, buf, sizeof(buf), "Sin empezar");
         lv_label_set_text(lbl_session_reset, buf);
     }
 
@@ -801,10 +819,11 @@ void ui_update(const UsageData* data) {
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
         int w_pct = (int)(data->weekly_pct + 0.5f);
+        if (w_pct > 100) w_pct = 100;
         lv_label_set_text(lbl_weekly_label, L.pills[1]);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-        format_reset_time(data->weekly_reset_mins, buf, sizeof(buf), "---");
+        format_reset_time(data->weekly_reset_mins, data, buf, sizeof(buf), "---");
         lv_obj_set_style_text_font(lbl_weekly_reset, L.reset_font, 0);
         lv_label_set_text(lbl_weekly_reset, buf);
     }

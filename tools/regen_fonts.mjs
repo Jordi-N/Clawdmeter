@@ -5,11 +5,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 const LATIN = '0x20-0x7E,0xE1,0xE9,0xED,0xF1,0xF3,0xFA,0xFC'; // lowercase only: capital accents and ¡¿ raise line_height and shift every layout
+// Styrene adds · (U+00B7) for "Reinicio 4h 41m · 18:00"; it has no ‧ (U+2027).
 const MONO_EXTRA = ',0xB7,0x2026,0x2722,0x2733,0x2736,0x273B,0x273D,0x2713';
 
 const fonts = [
   ...[56, 34].map((s) => ['tiempos', s, 'assets/TiemposText-400-Regular.otf', LATIN]),
-  ...[48, 28, 24, 20, 16, 14, 12].map((s) => ['styrene', s, 'assets/StyreneB-Regular.otf', LATIN]),
+  ...[48, 28, 24, 20, 16, 14, 12].map((s) => ['styrene', s, 'assets/StyreneB-Regular.otf', LATIN + ',0xB7']),
   ...[32, 18].map((s) => ['mono', s, 'assets/DejaVuSansMono.ttf', LATIN + MONO_EXTRA]),
 ];
 

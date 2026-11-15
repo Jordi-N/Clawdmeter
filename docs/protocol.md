@@ -164,6 +164,9 @@ Fork only.
   between; the device keeps both in NVS:
   - `br`: brightness level 0-3.
   - `vol`: chime loudness, 0-100 % of the board's tuned level.
+  - `lt`: local wall-clock epoch (like `t`) on every usage write, whatever
+    the `clock` setting. The reset lines add the clock time where they fit:
+    "Reinicio 4h 41m · 18:00", "Reinicio 2d 3h · mié 18:00".
 - The serial `info` line also carries `link` (`usb` | `wifi` | `ble` |
   `none`, the app's link as the device sees it), `up` (seconds since boot),
   `heap` (free bytes, 0 when unknown), `rst` (why it last started: `power`, `sw`, `panic`, `wdt`, `brownout`, `usb`, `ext`, `other`), `bat`, `chg` and `usb`. The Device

@@ -49,6 +49,7 @@ struct Layout {
     const lv_font_t* reset_font;     // "Resets in ..." line
     const lv_font_t* period_font;    // spend-capped period line (reset_font when it fits)
     bool    period_short;            // no room for its pace word: "Resets <date>" in the pace colour
+    bool    reset_clock;             // the reset line has room for " · 18:00" (RESET_CLOCK_WIDEST)
     const lv_font_t* pace_font;
     const char* const* pills;        // PILL_TEXT or PILL_TEXT_SHORT (ui_text.h)
 

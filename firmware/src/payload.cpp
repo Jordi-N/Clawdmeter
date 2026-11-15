@@ -37,6 +37,7 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
     copy_str(d.reset_date, sizeof(d.reset_date), doc["rd"] | "");
     d.clock_epoch = doc["t"] | 0L;
     d.clock_fmt = doc["tf"] | 24;
+    d.local_epoch = doc["lt"] | 0L;
 
     // ---- fast clock (optional) ----
     JsonVariant a = doc["a"];

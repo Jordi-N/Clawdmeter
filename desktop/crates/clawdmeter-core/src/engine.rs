@@ -561,6 +561,7 @@ impl Engine {
             if self.settings.reset_chime {
                 p.c = Some(1);
             }
+            p.lt = Some(now + host.utc_offset_secs);
             if let Some(cf) = clock_fields(self.settings.clock, utc(now), host.utc_offset_secs, host.prefers_12h) {
                 p.t = Some(cf.local_epoch);
                 p.tf = Some(cf.hour_format);
@@ -729,7 +730,7 @@ mod tests {
         assert_eq!(w.kind, WriteKind::Poll);
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0}"#
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"lt":1760000000}"#
         );
         assert!(write(&mut e, T0 + 1).is_none());
     }
@@ -746,7 +747,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"lt":1760000300}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {
@@ -1310,5 +1311,13 @@ mod tests {
         e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
         let w = e.next_write(T0, HostClock { utc_offset_secs: -3600, prefers_12h: false }).unwrap();
         assert_eq!((w.payload.t, w.payload.tf), (Some(T0 - 3600), Some(12)));
+    }
+
+    #[test]
+    fn local_time_sent_with_the_clock_off() {
+        let mut e = Engine::new(settings("clock = off\n"));
+        e.on_poll_results(T0, vec![(PathBuf::from("/h/.claude"), Ok(reading(15)))]);
+        let w = e.next_write(T0, HostClock { utc_offset_secs: 3600, prefers_12h: false }).unwrap();
+        assert_eq!((w.payload.t, w.payload.lt), (None, Some(T0 + 3600)));
     }
 }
