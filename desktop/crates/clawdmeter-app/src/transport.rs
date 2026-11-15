@@ -264,6 +264,42 @@ fn is_info(line: &str) -> bool {
     line.starts_with('{') && line.contains("\"env\":")
 }
 
+/// The board's own log lines (boot, health, stalls, BLE/WiFi events) go to
+/// the app log as `board: ...`, at most [`BOARD_LINES_PER_MIN`] a minute;
+/// the rest are counted and the count is logged with the next window.
+const BOARD_LINES_PER_MIN: u32 = 30;
+
+#[derive(Default)]
+struct BoardLog {
+    window_start: i64,
+    shown: u32,
+    held: u32,
+}
+
+impl BoardLog {
+    /// Whether `line` (at unix second `now`) should be logged, and how many
+    /// lines were held back in the window that just ended.
+    fn admit(&mut self, now: i64) -> (bool, u32) {
+        let mut held_before = 0;
+        if now - self.window_start >= 60 {
+            held_before = self.held;
+            *self = BoardLog { window_start: now, shown: 0, held: 0 };
+        }
+        if self.shown < BOARD_LINES_PER_MIN {
+            self.shown += 1;
+            (true, held_before)
+        } else {
+            self.held += 1;
+            (false, held_before)
+        }
+    }
+}
+
+/// A line the firmware printed for people, not for the app.
+fn is_board_log(line: &str) -> bool {
+    !line.is_empty() && !line.starts_with('{')
+}
+
 /// The firmware's reply to a line it took.
 fn is_ack(line: &str) -> bool {
     line.trim() == r#"{"ack":true}"#
@@ -337,6 +373,7 @@ impl UsbLink {
         let info = Arc::new(std::sync::Mutex::new(first_info));
         let (up, seen, slot, name) = (alive.clone(), last_rx.clone(), info.clone(), port.clone());
         std::thread::Builder::new().name("clawdmeter-usb".into()).spawn(move || {
+            let mut board = BoardLog::default();
             while up.load(Ordering::Relaxed) {
                 match reader.read(&mut buf) {
                     Ok(0) => {}
@@ -356,6 +393,14 @@ impl UsbLink {
                             if let Some(ev) = line_event(&line) {
                                 if tx.send(ev).is_err() {
                                     up.store(false, Ordering::Relaxed);
+                                }
+                            } else if is_board_log(&line) {
+                                let (show, held) = board.admit(clawdmeter_core::unix_now());
+                                if held > 0 {
+                                    log::info!("board: ({held} lines held back in the last minute)");
+                                }
+                                if show {
+                                    log::info!("board: {line}");
                                 }
                             }
                         }
@@ -537,6 +582,26 @@ pub fn ssid_from_netsh(out: &str) -> Option<String> {
         let v = v.trim();
         (k.trim() == "SSID" && !v.is_empty()).then(|| v.to_owned())
     })
+}
+
+#[cfg(test)]
+mod board_log_tests {
+    use super::*;
+
+    #[test]
+    fn board_lines_are_capped_per_minute() {
+        let mut b = BoardLog::default();
+        for _ in 0..BOARD_LINES_PER_MIN {
+            assert_eq!(b.admit(1000), (true, 0));
+        }
+        assert_eq!(b.admit(1010), (false, 0));
+        assert_eq!(b.admit(1020), (false, 0));
+        // A new minute: shown again, with the count of what was held back.
+        assert_eq!(b.admit(1060), (true, 2));
+        assert!(is_board_log("Stall: a loop took 900 ms"));
+        assert!(!is_board_log(r#"{"ack":true}"#));
+        assert!(!is_board_log(""));
+    }
 }
 
 #[cfg(test)]
