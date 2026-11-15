@@ -126,12 +126,7 @@ impl std::fmt::Display for DeviceError {
 /// off Windows. Only called after a failed open.
 #[cfg(windows)]
 fn open_os_error(port: &str) -> Option<i32> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(format!(r"\\.\{port}"))
-        .err()
-        .and_then(|e| e.raw_os_error())
+    std::fs::OpenOptions::new().read(true).write(true).open(format!(r"\\.\{port}")).err().and_then(|e| e.raw_os_error())
 }
 
 #[cfg(not(windows))]
