@@ -22,11 +22,6 @@ static const char* const PILL_TEXT_SHORT[4] = { "5h", "7d", "Gasto", "Ciclo" };
 // Widest text a card's reset line shows: the weekly window's last day, the
 // spend-capped account's caption, and its period line (its widest pace word and date).
 static const char* const RESET_TEXT_WIDEST[] = { "Reinicio 23h 59m", "Reinicio 6d 23h", "del límite de gasto" };
-// The same line with the reset's clock time, shown only where it fits
-// (layout.cpp sets L.reset_clock): "Reinicio 4h 41m · 18:00".
-static const char* const RESET_CLOCK_WIDEST[] = {
-    "Reinicio 23h 59m · 12:59 PM", "Reinicio 6d 23h · mié 12:59 PM",
-};
 #define PERIOD_TEXT_WIDEST "Por debajo - Reinicio May 30"
 #define PERIOD_TEXT_SHORT_WIDEST "Reinicio May 30"   // where no size fits the pace word too
 

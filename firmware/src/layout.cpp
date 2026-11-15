@@ -302,8 +302,6 @@ static void fit_pairing(Layout& L, const Design& d) {
 static void fit_period(Layout& L) {
     const int16_t inner = L.card[0].w - 2 * L.pad_x;
     L.period_short = false;
-    const int n = sizeof(RESET_CLOCK_WIDEST) / sizeof(RESET_CLOCK_WIDEST[0]);
-    L.reset_clock = widest(L.reset_font, RESET_CLOCK_WIDEST, n) <= inner;
     for (const lv_font_t* f : TEXT_FONTS) {
         if (line_h(f) > line_h(L.reset_font)) continue;
         L.period_font = f;

@@ -220,8 +220,9 @@ static void place_pace_tick(lv_obj_t* tick, float elapsed_pct) {
 // `none`: what a missing reset time means (-1 in the payload): the session
 // window hasn't started, the weekly one is unknown.
 // "Reinicio 4h 41m", plus " · 18:00" when the app sent the local time
-// (`lt`) and the card has room; a reset a day or more away also names the
-// weekday (" · mié 18:00").
+// (`lt`); a reset a day or more away also names the weekday
+// (" · mié 18:00"). Each text is measured: where it's too wide for the
+// card the weekday goes first, then the clock time.
 static void format_reset_time(int mins, const UsageData* d, char* buf, size_t len, const char* none) {
     if (mins < 0) {
         snprintf(buf, len, "%s", none);
@@ -231,19 +232,25 @@ static void format_reset_time(int mins, const UsageData* d, char* buf, size_t le
     if (mins < 60) n = snprintf(buf, len, "Reinicio %dm", mins);
     else if (mins < 1440) n = snprintf(buf, len, "Reinicio %dh %dm", mins / 60, mins % 60);
     else n = snprintf(buf, len, "Reinicio %dd %dh", mins / 1440, (mins % 1440) / 60);
-    if (d->local_epoch <= 0 || !L.reset_clock || n < 0 || (size_t)n >= len) return;
+    if (d->local_epoch <= 0 || n < 0 || (size_t)n >= len) return;
     static const char* const DAYS[7] = { "dom", "lun", "mar", "mié", "jue", "vie", "sáb" };
     const time_t at = (time_t)((d->local_epoch + (long)mins * 60 + 30) / 60 * 60);
     struct tm t;
     gmtime_r(&at, &t);   // the epoch is already local wall-clock
-    char day[8] = "";
-    if (mins >= 1440) snprintf(day, sizeof(day), "%s ", DAYS[t.tm_wday]);
+    char hm[12];
     if (d->clock_fmt == 12) {
         const int h = t.tm_hour % 12 ? t.tm_hour % 12 : 12;
-        snprintf(buf + n, len - n, " · %s%d:%02d %s", day, h, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
+        snprintf(hm, sizeof(hm), "%d:%02d %s", h, t.tm_min, t.tm_hour < 12 ? "AM" : "PM");
     } else {
-        snprintf(buf + n, len - n, " · %s%02d:%02d", day, t.tm_hour, t.tm_min);
+        snprintf(hm, sizeof(hm), "%02d:%02d", t.tm_hour, t.tm_min);
     }
+    const int32_t room = L.card[0].w - 2 * L.pad_x;
+    if (mins >= 1440) {
+        snprintf(buf + n, len - n, " · %s %s", DAYS[t.tm_wday], hm);
+        if (layout_text_width(L.reset_font, buf) <= room) return;
+    }
+    snprintf(buf + n, len - n, " · %s", hm);
+    if (layout_text_width(L.reset_font, buf) > room) buf[n] = '\0';
 }
 
 static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
