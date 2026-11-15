@@ -85,6 +85,13 @@ bool payload_parse(const char* json, UsageData* out, const char** err) {
         int v = br | 2;
         d.brightness = (int8_t)(v < 0 ? 0 : v > 3 ? 3 : v);
     }
+    JsonVariant bc = doc["bc"];
+    if (bc.isNull()) {
+        d.battery_care = -1;
+    } else {
+        int v = bc | 1;
+        d.battery_care = (int8_t)(v < 0 ? 0 : v > 2 ? 2 : v);
+    }
     JsonVariant vol = doc["vol"];
     if (vol.isNull()) {
         d.chime_level = -1;

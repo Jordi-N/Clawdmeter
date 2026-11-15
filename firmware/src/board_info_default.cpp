@@ -12,3 +12,4 @@ __attribute__((weak)) void sound_hal_set_level(int) {}
 
 // Weak default: boards without a PMU that can cut the power.
 __attribute__((weak)) bool power_hal_shutdown(void) { return false; }
+__attribute__((weak)) void power_hal_set_battery_care(int) {}

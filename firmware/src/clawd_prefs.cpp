@@ -3,6 +3,7 @@
 #include "clawd_policy.h"
 #include "ui.h"
 #include "hal/sound_hal.h"
+#include "hal/power_hal.h"
 #include <Preferences.h>
 #include <Arduino.h>
 
@@ -13,8 +14,10 @@ void clawd_prefs_init(void) {
     const int attn = prefs.getUChar("attn_anim", CLAWD_ATTN_ANIM_DEFAULT_S);
     const bool pace = prefs.getUChar("pace_mark", 0) != 0;
     const int level = prefs.getUChar("chime_lvl", 100);
+    const int care = prefs.getUChar("bat_care", 0);   // until the app says: as before
     prefs.end();
     chime_level_set(level);
+    battery_care_set(care);
     director_set_liveliness(clawd_liveliness_clamp(lively));
     director_set_attn_anim(clawd_attn_anim_clamp(attn));
     pace_marker_set(pace);
@@ -75,3 +78,15 @@ void chime_level_set(int pct) {
 }
 
 int chime_level_get(void) { return chime_level; }
+
+static int battery_care = -1;   // -1 until the saved mode is applied
+
+void battery_care_set(int mode) {
+    mode = mode < 0 ? 0 : mode > 2 ? 2 : mode;
+    if (mode == battery_care) return;
+    const bool first = battery_care < 0;
+    battery_care = mode;
+    power_hal_set_battery_care(mode);
+    Serial.printf("Battery care: %s\n", mode == 0 ? "full charge" : mode == 1 ? "4.1 V" : "stop at 95 %");
+    if (!first) save("bat_care", (uint8_t)mode);
+}

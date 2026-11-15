@@ -25,6 +25,8 @@ static bool     pwr_released_flag = false;
 static uint32_t last_battery_ms   = 0;
 static uint32_t last_charging_ms  = 0;
 static uint32_t last_pwr_ms       = 0;
+static int      care_mode         = 0;      // power_hal_set_battery_care
+static bool     charge_on         = true;   // the charger is enabled
 
 void power_hal_init(void) {
     if (!pmu.begin(Wire, AXP2101_ADDR, IIC_SDA, IIC_SCL)) {
@@ -60,6 +62,29 @@ void power_hal_init(void) {
     cached_pct = pmu.getBatteryPercent();
 }
 
+// Mode 2 keeps 90-95 %: the charger stops at 95 % and starts again at 90 %
+// (the gauge's estimate). Without USB nothing charges anyway: it's re-armed.
+static void care_tick(void) {
+    bool want = true;
+    if (care_mode == 2 && cached_vbus && cached_pct >= 0)
+        want = charge_on ? cached_pct < 95 : cached_pct <= 90;
+    if (want == charge_on) return;
+    charge_on = want;
+    if (want) pmu.enableCellbatteryCharge();
+    else pmu.disableCellbatteryCharge();
+    Serial.printf("Battery care: charging %s at %d %%\n", want ? "resumed" : "paused", cached_pct);
+}
+
+void power_hal_set_battery_care(int mode) {
+    if (!pmu_ok) return;
+    care_mode = mode;
+    // 4.1 V tops out near 90 %; the other modes charge to the usual 4.2 V.
+    pmu.setChargeTargetVoltage(mode == 1 ? XPOWERS_AXP2101_CHG_VOL_4V1 : XPOWERS_AXP2101_CHG_VOL_4V2);
+    charge_on = true;
+    pmu.enableCellbatteryCharge();
+    care_tick();
+}
+
 void power_hal_tick(void) {
     uint32_t now = millis();
 
@@ -71,6 +96,7 @@ void power_hal_tick(void) {
     if (now - last_battery_ms >= BATTERY_POLL_MS) {
         last_battery_ms = now;
         cached_pct = pmu.getBatteryPercent();
+        if (pmu_ok) care_tick();
     }
     if (now - last_pwr_ms >= PWR_POLL_MS) {
         last_pwr_ms = now;

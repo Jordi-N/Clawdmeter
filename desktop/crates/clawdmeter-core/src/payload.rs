@@ -92,6 +92,10 @@ pub struct Payload {
     /// value it got.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm: Option<u8>,
+    /// Fork only: battery care, 0 full charge, 1 stop at 4.1 V, 2 stop at
+    /// 95 % (resume at 90 %). On every data payload; the device keeps it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bc: Option<u8>,
     /// Fork only: screen brightness level 0-3, sent only when the user
     /// changes it in the app (the device's PWR button still cycles it).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,7 +119,7 @@ pub struct Payload {
 /// Every key [`Payload`] can emit, in serialization order.
 pub const PAYLOAD_KEYS: &[&str] = &[
     "s", "sr", "w", "wr", "st", "acct", "tp", "pd", "rd", "t", "tf", "c", "ok", "b", "m", "x", "a", "e", "es", "n",
-    "rp", "lv", "aa", "pm", "br", "vol", "lt", "ag",
+    "rp", "lv", "aa", "pm", "bc", "br", "vol", "lt", "ag",
 ];
 /// The fast-clock keys added in v0.4 (old firmware ignores them).
 pub const ADDITIVE_KEYS: &[&str] = &["a", "e", "es", "n", "rp"];
@@ -550,6 +554,7 @@ mod tests {
             lv: Some(3),
             aa: Some(120),
             pm: Some(1),
+            bc: Some(1),
             br: Some(2),
             vol: Some(80),
             lt: Some(6),

@@ -154,6 +154,7 @@ pub struct Engine {
     sent_aa: Option<u16>,
     /// The pace marker the device last got (`pm`).
     sent_pm: Option<u8>,
+    sent_bc: Option<u8>,
     sent_br: Option<u8>,
     sent_vol: Option<u8>,
     last_event_ts: Option<i64>,
@@ -201,6 +202,7 @@ impl Engine {
             sent_lv: None,
             sent_aa: None,
             sent_pm: None,
+            sent_bc: None,
             sent_br: None,
             sent_vol: None,
             last_event_ts: None,
@@ -309,6 +311,7 @@ impl Engine {
         self.sent_lv = None;
         self.sent_aa = None;
         self.sent_pm = None;
+        self.sent_bc = None;
         self.sent_br = None;
         self.sent_vol = None;
         self.sent_ag = None;
@@ -525,6 +528,7 @@ impl Engine {
         // A changed device setting goes out right away, like an event.
         let aa = self.settings.attention_anim.seconds();
         let pm = u8::from(self.settings.pace_marker);
+        let bc = self.settings.battery_care;
         // Brightness and volume go out only when they change, so the
         // device's own button keeps working in between.
         let br = self.settings.brightness.filter(|b| self.sent_br != Some(*b));
@@ -532,6 +536,7 @@ impl Engine {
         let prefs_changed = self.sent_lv != Some(self.settings.liveliness)
             || self.sent_aa != Some(aa)
             || self.sent_pm != Some(pm)
+            || self.sent_bc != Some(bc)
             || br.is_some()
             || vol.is_some();
 
@@ -572,6 +577,7 @@ impl Engine {
             p.lv = Some(self.settings.liveliness);
             p.aa = Some(aa);
             p.pm = Some(pm);
+            p.bc = Some(bc);
             p.br = br;
             p.vol = vol;
             (p, kind)
@@ -630,6 +636,9 @@ impl Engine {
         }
         if let Some(pm) = w.payload.pm {
             self.sent_pm = Some(pm);
+        }
+        if let Some(bc) = w.payload.bc {
+            self.sent_bc = Some(bc);
         }
         if let Some(br) = w.payload.br {
             self.sent_br = Some(br);
@@ -730,7 +739,7 @@ mod tests {
         assert_eq!(w.kind, WriteKind::Poll);
         assert_eq!(
             w.payload.to_json(),
-            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"lt":1760000000}"#
+            r#"{"s":15,"sr":60,"w":10,"wr":1440,"st":"allowed","acct":"pro","ok":true,"lv":3,"aa":120,"pm":0,"bc":1,"lt":1760000000}"#
         );
         assert!(write(&mut e, T0 + 1).is_none());
     }
@@ -747,7 +756,7 @@ mod tests {
         assert_eq!(hb.kind, WriteKind::Heartbeat);
         assert_eq!(
             hb.payload.to_json(),
-            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"lt":1760000300}"#
+            r#"{"s":15,"sr":55,"w":10,"wr":1435,"st":"allowed","acct":"pro","c":1,"ok":true,"rp":1,"lv":3,"aa":120,"pm":0,"bc":1,"lt":1760000300}"#
         );
         // Three misses: stale, heartbeats stop so the device's freshness lapses.
         for i in 1..=3 {

@@ -970,7 +970,8 @@ impl SettingsView {
                 });
             },
         );
-        let (me2, me3, me4) = (cx.entity().downgrade(), cx.entity().downgrade(), cx.entity().downgrade());
+        let (me2, me3, me4, me5) =
+            (cx.entity().downgrade(), cx.entity().downgrade(), cx.entity().downgrade(), cx.entity().downgrade());
         let on_lock = self.settings.rest_on_lock;
         pane.child(div().pt(px(18.)).child(subheading(t, "Encendido")))
             .child(field(
@@ -1021,6 +1022,24 @@ impl SettingsView {
                     move |c, _, cx| {
                         let _ = me4.update(cx, |v, cx| {
                             v.save(|s, _| s.chime_volume = c);
+                            cx.notify();
+                        });
+                    },
+                ),
+            ))
+            .child(field(
+                t,
+                "Cuidado de la batería",
+                "Cargarla siempre al 100 % la gasta antes. 4,1 V la deja en torno al 90 %; 95 % deja de cargar ahí y vuelve a cargar al bajar del 90 %.",
+                segmented(
+                    t,
+                    "battery-care",
+                    &[(0, "100 %"), (1, "4,1 V"), (2, "95 %")],
+                    &self.settings.battery_care,
+                    true,
+                    move |c, _, cx| {
+                        let _ = me5.update(cx, |v, cx| {
+                            v.save(|s, _| s.battery_care = c);
                             cx.notify();
                         });
                     },

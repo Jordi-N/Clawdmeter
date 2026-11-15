@@ -29,3 +29,8 @@ bool power_hal_pwr_released(void);
 // false where the board can't; the weak default in board_info_default.cpp.
 // Only a PWR press turns the board back on.
 bool power_hal_shutdown(void);
+
+// Optional: battery care (`bc`). 0 charges to full, 1 stops at 4.1 V (about
+// 90 %), 2 stops at 95 % and resumes at 90 %. No-op on boards without a
+// charger the firmware can set (weak default in board_info_default.cpp).
+void power_hal_set_battery_care(int mode);

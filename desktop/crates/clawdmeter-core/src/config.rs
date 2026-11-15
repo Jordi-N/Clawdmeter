@@ -272,6 +272,9 @@ pub struct Settings {
     pub brightness: Option<u8>,
     /// Chime loudness 0-100 % (`vol`); `None`: the device's own.
     pub chime_volume: Option<u8>,
+    /// Battery care (`bc`): 0 charges to 100 %, 1 stops at 4.1 V (about
+    /// 90 %, the default), 2 stops at 95 % and resumes at 90 %.
+    pub battery_care: u8,
     /// Rest the device while this computer is locked, wake it on unlock
     /// (`rest_on_lock`, default on; Windows).
     pub rest_on_lock: bool,
@@ -284,6 +287,14 @@ pub struct Settings {
     pub wifi_key: Option<Secret>,
     /// `wifi_ssid`: the network last sent to the device (prefills the form).
     pub wifi_ssid: Option<String>,
+}
+
+/// `battery_care` values in the file, by `bc` level.
+const BATTERY_CARE_NAMES: [&str; 3] = ["off", "4.1v", "95"];
+const BATTERY_CARE_DEFAULT: u8 = 1;
+
+fn parse_battery_care(v: &str) -> u8 {
+    BATTERY_CARE_NAMES.iter().position(|n| n.eq_ignore_ascii_case(v.trim())).map_or(BATTERY_CARE_DEFAULT, |i| i as u8)
 }
 
 /// `alert_on`: the alert kinds that show, as a comma list of `permission`,
@@ -414,6 +425,7 @@ impl Settings {
             pace_marker: on_off(cfg.get("pace_marker"), false),
             brightness: cfg.get("brightness").and_then(|v| v.trim().parse::<u8>().ok()).map(|v| v.min(3)),
             chime_volume: cfg.get("chime_volume").and_then(|v| v.trim().parse::<u8>().ok()).map(|v| v.min(100)),
+            battery_care: cfg.get("battery_care").map(parse_battery_care).unwrap_or(BATTERY_CARE_DEFAULT),
             rest_on_lock: on_off(cfg.get("rest_on_lock"), true),
             connection: cfg.get("connection").map(Connection::parse).unwrap_or_default(),
             wifi_host: cfg.get("wifi_host").filter(|s| !s.is_empty()).map(str::to_owned),
@@ -521,6 +533,9 @@ impl Settings {
                     None => cfg.remove(key),
                 }
             }
+        }
+        if current.battery_care != self.battery_care {
+            cfg.set("battery_care", BATTERY_CARE_NAMES[usize::from(self.battery_care.min(2))]);
         }
         if current.connection != self.connection {
             cfg.set("connection", self.connection.as_str());
@@ -698,6 +713,21 @@ mod tests {
         s.apply_to(&mut cfg, &paths());
         assert_eq!(cfg.get("attention_anim"), Some("off"));
         assert_eq!(Settings::from_config(&cfg, &paths(), None).attention_anim, AttentionAnim::Off);
+    }
+
+    #[test]
+    fn battery_care() {
+        assert_eq!(settings("").battery_care, 1, "4.1 V by default");
+        assert_eq!(settings("battery_care = off\n").battery_care, 0);
+        assert_eq!(settings("battery_care = 95\n").battery_care, 2);
+        assert_eq!(settings("battery_care = nonsense\n").battery_care, 1);
+        let mut cfg = ConfigFile::parse("");
+        let mut s = Settings::from_config(&cfg, &paths(), None);
+        s.apply_to(&mut cfg, &paths());
+        assert!(cfg.get("battery_care").is_none(), "the default stays out of the file");
+        s.battery_care = 2;
+        s.apply_to(&mut cfg, &paths());
+        assert_eq!(cfg.get("battery_care"), Some("95"));
     }
 
     #[test]

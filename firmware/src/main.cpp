@@ -538,6 +538,7 @@ static void handle_line(const char* json, Link link) {
         if (usage.pace_marker >= 0) pace_marker_set(usage.pace_marker != 0);
         if (usage.brightness >= 0) brightness_set_index(usage.brightness);
         if (usage.chime_level >= 0) chime_level_set(usage.chime_level);
+        if (usage.battery_care >= 0) battery_care_set(usage.battery_care);
         ui_update(&usage);
         // A prompt (or you're back after a gap): you're at the computer,
         // so a dimmed or dark panel wakes before Clawd notices you. A

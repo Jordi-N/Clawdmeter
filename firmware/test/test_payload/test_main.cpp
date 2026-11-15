@@ -132,6 +132,11 @@ static void test_device_levels(void) {
     TEST_ASSERT_TRUE(payload_parse("{\"br\":9,\"vol\":250}", &d, nullptr));
     TEST_ASSERT_EQUAL_INT(3, d.brightness);        // clamped
     TEST_ASSERT_EQUAL_INT(100, d.chime_level);
+    TEST_ASSERT_EQUAL_INT(-1, d.battery_care);     // absent
+    TEST_ASSERT_TRUE(payload_parse("{\"bc\":2}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(2, d.battery_care);
+    TEST_ASSERT_TRUE(payload_parse("{\"bc\":7}", &d, nullptr));
+    TEST_ASSERT_EQUAL_INT(2, d.battery_care);      // clamped
 }
 
 static void test_long_strings_truncate(void) {
