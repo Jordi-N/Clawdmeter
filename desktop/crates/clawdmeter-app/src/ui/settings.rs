@@ -481,11 +481,15 @@ impl SettingsView {
                 let mut tries = 0;
                 let info = loop {
                     match device::probe_info(&port, Duration::from_millis(1500)) {
-                        Err(device::DeviceError::Busy { .. }) if tries < 6 => {
+                        Err(device::DeviceError::Busy { .. } | device::DeviceError::Stuck { .. }) if tries < 6 => {
                             tries += 1;
                             std::thread::sleep(Duration::from_millis(500));
                         }
-                        r => break r.ok().flatten(),
+                        Err(e) => {
+                            log::info!("Device page probe on {port}: {e}");
+                            break None;
+                        }
+                        Ok(i) => break i,
                     }
                 };
                 (Some(port), info)

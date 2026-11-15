@@ -143,12 +143,14 @@ pub trait FlashHardware: Send + Sync + 'static {
 /// seconds while it's still busy: the daemon may be mid-handshake on it.
 pub struct Usb(pub Paths);
 
-/// Run `open` until the port isn't busy, for up to about 5 s.
+/// Run `open` until the port isn't busy, for up to about 5 s. A port that's
+/// listed but won't open (`Stuck`) gets the same wait: a board that just
+/// reset can take that long to come back.
 fn until_free<T>(mut open: impl FnMut() -> Result<T, DeviceError>) -> Result<T, DeviceError> {
     let mut tries = 0;
     loop {
         match open() {
-            Err(DeviceError::Busy { .. }) if tries < 10 => {
+            Err(DeviceError::Busy { .. } | DeviceError::Stuck { .. }) if tries < 10 => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -163,11 +165,25 @@ impl FlashHardware for Usb {
     }
     fn probe_info(&self, port: &str) -> Option<FirmwareInfo> {
         crate::ipc::claim_usb(&self.0, 15);
-        until_free(|| device::probe_info(port, Duration::from_millis(1500))).ok().flatten()
+        match until_free(|| device::probe_info(port, Duration::from_millis(1500))) {
+            Ok(Some(i)) => Some(i),
+            Ok(None) => {
+                log::info!("{port}: no firmware answered info; asking the ROM bootloader");
+                None
+            }
+            Err(e) => {
+                log::info!("{port}: info probe failed: {e}");
+                None
+            }
+        }
     }
     fn probe_chip(&self, port: &str) -> Result<ChipInfo, DeviceError> {
         crate::ipc::claim_usb(&self.0, 20);
-        until_free(|| device::probe_chip(port))
+        let r = until_free(|| device::probe_chip(port));
+        if let Err(e) = &r {
+            log::warn!("{port}: chip probe failed: {e}");
+        }
+        r
     }
     fn flash(
         &self,
@@ -179,6 +195,9 @@ impl FlashHardware for Usb {
         // Writing plus the reboot and the check after it.
         crate::ipc::claim_usb(&self.0, 300);
         let r = until_free(|| device::flash_merged(port, image, board, &mut *progress));
+        if let Err(e) = &r {
+            log::warn!("{port}: flashing failed: {e}");
+        }
         crate::ipc::claim_usb(&self.0, 15);
         r
     }

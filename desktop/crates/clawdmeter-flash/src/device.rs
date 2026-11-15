@@ -40,6 +40,13 @@ pub enum DeviceError {
         /// The port.
         port: String,
     },
+    /// The OS still lists the port but can't open it, and nobody holds it
+    /// (Windows: "file not found" on a listed COM port, a USB device that
+    /// hung). Only re-plugging the cable brings it back.
+    Stuck {
+        /// The port.
+        port: String,
+    },
     /// The board went away (unplugged, or reset onto another port).
     Disconnected,
     /// The board didn't answer the ROM bootloader handshake.
@@ -80,6 +87,11 @@ impl std::fmt::Display for DeviceError {
             DeviceError::Busy { port } => {
                 write!(f, "{port} está en uso. Cierra el monitor serie u otra app que lo use y vuelve a intentarlo.")
             }
+            DeviceError::Stuck { port } => write!(
+                f,
+                "El sistema todavía muestra {port}, pero la placa no responde por USB. Desconecta el cable, \
+                 vuelve a conectarlo y reinténtalo."
+            ),
             DeviceError::Disconnected => write!(f, "La placa se desconectó. Vuelve a conectar el USB y reinténtalo."),
             DeviceError::NoBootloader(_) => {
                 write!(f, "La placa no responde. Desconéctala, mantén pulsado BOOT mientras la vuelves a conectar y reinténtalo.")
@@ -109,6 +121,24 @@ impl std::fmt::Display for DeviceError {
     }
 }
 
+/// Windows' own error code for opening `port` (5 = in use, 2 = listed but
+/// gone), which serialport folds into one kind. `None` when it opens now or
+/// off Windows. Only called after a failed open.
+#[cfg(windows)]
+fn open_os_error(port: &str) -> Option<i32> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(format!(r"\\.\{port}"))
+        .err()
+        .and_then(|e| e.raw_os_error())
+}
+
+#[cfg(not(windows))]
+fn open_os_error(_port: &str) -> Option<i32> {
+    None
+}
+
 /// `esp32s3` → `ESP32-S3`.
 pub fn pretty_chip(id: &str) -> String {
     let up = id.to_ascii_uppercase();
@@ -122,12 +152,19 @@ impl DeviceError {
     /// Classify a failure to open `port`.
     pub fn from_open(port: &str, e: serialport::Error) -> Self {
         use serialport::ErrorKind as K;
+        let os = open_os_error(port);
+        log::info!("opening {port} failed: {e} ({:?}, OS error {os:?})", e.kind());
         match e.kind() {
             K::Io(std::io::ErrorKind::PermissionDenied) => DeviceError::PermissionDenied { port: port.to_owned() },
             K::Io(std::io::ErrorKind::NotFound) => DeviceError::Disconnected,
-            // EBUSY / TIOCEXCL on POSIX, ACCESS_DENIED on Windows (another
-            // handle holds it), or a vanished device.
-            K::NoDevice if list_ports().iter().any(|p| p.path == port) => DeviceError::Busy { port: port.to_owned() },
+            // serialport reports EBUSY / TIOCEXCL on POSIX, and on Windows
+            // ACCESS_DENIED (another handle holds it) and FILE_NOT_FOUND
+            // (a listed port whose device hung) alike: the OS code tells them
+            // apart.
+            K::NoDevice if list_ports().iter().any(|p| p.path == port) => match os {
+                Some(2 | 3) => DeviceError::Stuck { port: port.to_owned() },
+                _ => DeviceError::Busy { port: port.to_owned() },
+            },
             K::NoDevice => DeviceError::Disconnected,
             _ => DeviceError::Serial(e.to_string()),
         }
@@ -835,5 +872,7 @@ mod tests {
         assert!(p.starts_with("Sin permiso para abrir /dev/ttyACM0."));
         #[cfg(target_os = "linux")]
         assert!(p.contains("dialout"));
+        let s = DeviceError::Stuck { port: "COM7".into() }.to_string();
+        assert!(s.starts_with("El sistema todavía muestra COM7, pero la placa no responde por USB."));
     }
 }

@@ -347,9 +347,14 @@ pub fn claim_usb(paths: &Paths, secs: i64) {
     if !on_usb() {
         return;
     }
-    let end = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < end && on_usb() {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(3) && on_usb() {
         std::thread::sleep(Duration::from_millis(100));
+    }
+    if on_usb() {
+        log::warn!("the daemon still holds the USB link after 3 s");
+    } else {
+        log::info!("the daemon let go of USB after {} ms", start.elapsed().as_millis());
     }
     // The link's reader thread closes its handle within one read timeout.
     std::thread::sleep(Duration::from_millis(300));

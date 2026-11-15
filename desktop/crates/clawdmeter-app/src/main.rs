@@ -67,7 +67,13 @@ fn main() {
         std::process::exit(tray::run(paths));
     }
     attach_console();
-    logger::init();
+    // The window has no terminal on Windows: its flasher and Device page
+    // log to a file next to daemon.log.
+    if args[0] == "--window" {
+        logger::init_with_file(&paths.state_dir.join("window.log"));
+    } else {
+        logger::init();
+    }
     let code = match args[0].as_str() {
         "--daemon" => run_daemon(paths),
         "--window" => {
