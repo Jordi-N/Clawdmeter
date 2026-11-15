@@ -209,9 +209,9 @@ static void send_info() {
     char w[96];
     const size_t wn = host_wifi_status(w, sizeof(w));   // 0 on boards without WiFi
     Serial.printf("{\"env\":\"%s\",\"ver\":\"%s\",\"rev\":\"%s\",\"link\":\"%s\",\"up\":%lu,"
-                  "\"heap\":%lu,\"bat\":%d,\"chg\":%s,\"usb\":%s%s%s}\n",
+                  "\"heap\":%lu,\"rst\":\"%s\",\"bat\":%d,\"chg\":%s,\"usb\":%s%s%s}\n",
                   CLAWD_ENV, CLAWD_VERSION, board_hal_rev(), link_name(), (unsigned long)(millis() / 1000),
-                  (unsigned long)board_hal_free_heap(), power_hal_battery_pct(),
+                  (unsigned long)board_hal_free_heap(), board_hal_reset_reason(), power_hal_battery_pct(),
                   power_hal_is_charging() ? "true" : "false", power_hal_is_vbus_in() ? "true" : "false",
                   wn ? ",\"wifi\":" : "", wn ? w : "");
 }
@@ -325,6 +325,7 @@ void setup() {
     director_init();    // rooms + beats; boots on the meters (home)
     clawd_prefs_init();  // the saved device settings, before the app says otherwise
 
+    Serial.printf("Reset reason: %s\n", board_hal_reset_reason());
     Serial.printf("Dashboard ready (%s, %dx%d) %lu ms after boot, waiting for data on BLE...\n",
         board_caps().name, W, H, (unsigned long)millis());
 }
@@ -710,8 +711,15 @@ void loop() {
 
     // Connected to a host = BLE link or an authenticated TCP client; the UI
     // (status line, pairing hint, stale view) treats both the same.
+    // A BLE link counts once it's encrypted: a computer with a stale pairing
+    // connects and drops every few seconds, which made the hint flicker.
     ble_state_t bs = ble_get_state();
+    if (bs == BLE_STATE_CONNECTED && !ble_link_secure()) bs = BLE_STATE_ADVERTISING;
     if (host_link() != LINK_BLE) bs = BLE_STATE_CONNECTED;
+    {
+        const bool pairing = pair_open_until && (int32_t)(pair_open_until - millis()) > 0;
+        ui_set_pair_waiting(!pairing && (ble_has_bond() || host_wifi_has_creds()));
+    }
     if (bs != last_ble_state) {
         last_ble_state = bs;
         ui_update_ble_status(bs, ble_get_device_name(), ble_get_mac_address());

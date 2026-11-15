@@ -64,6 +64,7 @@ static NimBLECharacteristic* req_char = nullptr;
 
 static ble_state_t state = BLE_STATE_INIT;
 static bool need_advertise = false;
+static bool link_secure = false;   // ble_link_secure()
 // Off while the app talks over USB or WiFi (ble_set_radio).
 static bool radio_on = true;
 static uint32_t radio_kick_ms = 0;   // last disconnect sent while off
@@ -192,6 +193,7 @@ static void start_advertising() {
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
         state = BLE_STATE_CONNECTED;
+        if (info.isEncrypted()) link_secure = true;
         Serial.printf("BLE: connected from %s (active=%u)\n",
             info.getAddress().toString().c_str(),
             (unsigned)s->getConnectedCount());
@@ -222,7 +224,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
     void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
         // Only flip the UI state to DISCONNECTED when the last client leaves.
-        if (s->getConnectedCount() == 0) state = BLE_STATE_DISCONNECTED;
+        if (s->getConnectedCount() == 0) {
+            state = BLE_STATE_DISCONNECTED;
+            link_secure = false;
+        }
         need_advertise = true;
         // Drop any pending/spent param pushback for this handle — NimBLE
         // reuses conn handles, so stale state would leak onto the next link.
@@ -276,7 +281,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             Serial.printf("BLE: rejecting non-owner %s (owner=%s)\n", id.c_str(), owner_addr);
             NimBLEDevice::deleteBond(info.getIdAddress());
             server->disconnect(info);
+            return;
         }
+        if (info.isEncrypted()) link_secure = true;
+        else Serial.println("BLE: encryption failed: the computer keeps an old pairing (pair again)");
     }
 
 };
@@ -425,6 +433,9 @@ void ble_tick(void) {
 ble_state_t ble_get_state(void) {
     return state;
 }
+
+bool ble_link_secure(void) { return state == BLE_STATE_CONNECTED && link_secure; }
+bool ble_has_bond(void) { return NimBLEDevice::getNumBonds() > 0; }
 
 const char* ble_get_device_name(void) {
     return DEVICE_NAME;

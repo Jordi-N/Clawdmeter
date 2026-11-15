@@ -63,6 +63,7 @@ fn main() {
     let paths = Paths::for_user();
     if args.is_empty() {
         logger::init_with_file(&paths.state_dir.join("daemon.log"));
+        log::info!("Clawdmeter {} started", clawdmeter_app::version());
         warn_if_legacy_daemon(&paths);
         std::process::exit(tray::run(paths));
     }

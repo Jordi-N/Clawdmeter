@@ -11,3 +11,8 @@ const char* board_hal_rev(void);
 
 // Free heap in bytes for the `info` line (0 when the board can't tell).
 unsigned long board_hal_free_heap(void);
+
+// Why the chip last started, as a short token for `info` and the boot log
+// ("power", "sw", "panic", "wdt", "brownout", "usb", "deepsleep"; "" when
+// the board can't tell). Must be a static string.
+const char* board_hal_reset_reason(void);

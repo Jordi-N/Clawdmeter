@@ -5,6 +5,7 @@ void host_wifi_init(void) {}
 void host_wifi_tick(void (*)(const char*)) {}
 void host_wifi_apply(const WifiCmd*) {}
 bool host_wifi_client(void) { return false; }
+bool host_wifi_has_creds(void) { return false; }
 void host_wifi_send(const char*) {}
 WifiSt host_wifi_state(void) { return WIFI_ST_OFF; }
 size_t host_wifi_status(char*, size_t) { return 0; }
@@ -160,6 +161,7 @@ void host_wifi_tick(void (*on_line)(const char* line)) {
 }
 
 bool host_wifi_client(void) { return st == WIFI_ST_OK && tcp_host_authed(); }
+bool host_wifi_has_creds(void) { return ssid[0] != 0; }
 
 void host_wifi_send(const char* line) {
     if (st == WIFI_ST_OK) tcp_host_send(line);

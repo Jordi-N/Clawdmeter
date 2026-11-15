@@ -166,7 +166,7 @@ Fork only.
   - `vol`: chime loudness, 0-100 % of the board's tuned level.
 - The serial `info` line also carries `link` (`usb` | `wifi` | `ble` |
   `none`, the app's link as the device sees it), `up` (seconds since boot),
-  `heap` (free bytes, 0 when unknown), `bat`, `chg` and `usb`. The Device
+  `heap` (free bytes, 0 when unknown), `rst` (why it last started: `power`, `sw`, `panic`, `wdt`, `brownout`, `usb`, `ext`, `other`), `bat`, `chg` and `usb`. The Device
   page shows them under Diagnóstico.
 
 ## Power

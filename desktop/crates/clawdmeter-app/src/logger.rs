@@ -1,4 +1,4 @@
-//! A tiny stderr logger (`[HH:MM:SS] message`), so the
+//! A tiny stderr logger (`[YYYY-MM-DD HH:MM:SS] message`), so the
 //! binary doesn't carry env_logger's regex engine. Level from `CLAWDMETER_LOG`
 //! (`error|warn|info|debug|trace`, default `info`).
 
@@ -18,7 +18,7 @@ impl Log for Stderr {
         if !self.enabled(r.metadata()) {
             return;
         }
-        let t = chrono::Local::now().format("%H:%M:%S");
+        let t = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let lvl = match r.level() {
             Level::Error => "error: ",
             Level::Warn => "warning: ",

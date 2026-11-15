@@ -31,6 +31,9 @@ enum PairHint {
     PAIR_HINT_CLEARED,   // bonds were just cleared: ready to pair (reverts by itself)
 };
 void ui_set_pair_hint(PairHint hint);
+// true: the board is already set up (bonded or a WiFi network stored), so
+// the hint says to open the app instead of how to pair.
+void ui_set_pair_waiting(bool waiting);
 
 // Attention message on the status line (scrolls when long); NULL clears it
 // and the whimsical status line resumes.

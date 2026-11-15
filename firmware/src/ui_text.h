@@ -11,6 +11,8 @@ static const char* const PAIR_TEXT_PWR[3]     = { "Emparejar", "pulsa encendido 
 static const char* const PAIR_TEXT_TOUCH[3]   = { "Emparejar", "mantén el dedo aquí", "durante 5 s" };
 static const char* const PAIR_TEXT_CLEARED[3] = { "Listo", "elige Clawdmeter", "en tu ordenador" };
 static const char* const PAIR_TEXT_HOLDING    = "sigue pulsando...";
+// Already set up (a bond or a WiFi network): the app just isn't running yet.
+static const char* const PAIR_TEXT_WAITING[3] = { "En espera", "abre Clawdmeter", "en el ordenador" };
 
 // Card pills: session, weekly, then the spend-capped account's spending and
 // period. The short set is for panels too narrow for the long one.

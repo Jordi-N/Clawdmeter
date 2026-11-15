@@ -69,12 +69,12 @@ impl Link {
         }
     }
 
-    /// Still up?
-    pub async fn is_connected(&self) -> bool {
+    /// `None` while the link is up, else why it's down (for the log).
+    pub async fn down_reason(&self) -> Option<String> {
         match self {
-            Link::Ble(l) => l.is_connected().await,
-            Link::Wifi(l) => l.is_connected(),
-            Link::Usb(l) => l.is_connected(),
+            Link::Ble(l) => (!l.is_connected().await).then(|| "Bluetooth link lost".to_owned()),
+            Link::Wifi(l) => l.down_reason(),
+            Link::Usb(l) => l.down_reason(),
         }
     }
 
@@ -185,9 +185,12 @@ impl TcpLink {
     /// The device hasn't closed the connection, writes go through and it
     /// has answered lately.
     pub fn is_connected(&self) -> bool {
-        self.alive.load(Ordering::Relaxed)
-            && !self.health.is_zombie()
-            && clawdmeter_core::unix_now() - self.last_rx.load(Ordering::Relaxed) < SILENT_SECS
+        self.down_reason().is_none()
+    }
+
+    /// Why [`is_connected`](Self::is_connected) is false, if it is.
+    pub fn down_reason(&self) -> Option<String> {
+        down_reason(&self.alive, &self.health, &self.last_rx, "the device closed the connection")
     }
 
     /// Close the connection.
@@ -226,6 +229,26 @@ impl std::fmt::Debug for UsbLink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UsbLink").field("port", &self.port).finish()
     }
+}
+
+/// Why a TCP or USB link is down: `closed` when the reader stopped, failing
+/// writes, or the device silent for [`SILENT_SECS`]. `None` while it's up.
+fn down_reason(alive: &AtomicBool, health: &WriteHealth, last_rx: &AtomicI64, closed: &str) -> Option<String> {
+    let silent = clawdmeter_core::unix_now() - last_rx.load(Ordering::Relaxed);
+    if !alive.load(Ordering::Relaxed) {
+        Some(closed.to_owned())
+    } else if health.is_zombie() {
+        Some("writes keep failing".to_owned())
+    } else if silent >= SILENT_SECS {
+        Some(format!("no answer for {silent} s"))
+    } else {
+        None
+    }
+}
+
+/// The firmware's `info` reply.
+fn is_info(line: &str) -> bool {
+    line.starts_with('{') && line.contains("\"env\":")
 }
 
 /// The firmware's reply to a line it took.
@@ -277,6 +300,8 @@ impl UsbLink {
                 // request) is kept for the daemon.
                 if is_ack(&line) {
                     acked = true;
+                } else if is_info(&line) {
+                    log::info!("device info: {line}");
                 } else if let Some(ev) = line_event(&line) {
                     let _ = tx.send(ev);
                 }
@@ -288,6 +313,10 @@ impl UsbLink {
                 "the board's firmware doesn't answer on USB (update it)",
             ));
         }
+        // Uptime and reset reason in the log: tells a board that rebooted
+        // from one that only lost the link.
+        writer.write_all(b"info\n")?;
+        writer.flush()?;
         let alive = Arc::new(AtomicBool::new(true));
         let last_rx = Arc::new(AtomicI64::new(clawdmeter_core::unix_now()));
         let (up, seen) = (alive.clone(), last_rx.clone());
@@ -299,6 +328,9 @@ impl UsbLink {
                         for line in take_lines(&mut pending, &buf[..n]) {
                             if is_ack(&line) {
                                 seen.store(clawdmeter_core::unix_now(), Ordering::Relaxed);
+                            }
+                            if is_info(&line) {
+                                log::info!("device info: {line}");
                             }
                             if let Some(ev) = line_event(&line) {
                                 if tx.send(ev).is_err() {
@@ -339,9 +371,12 @@ impl UsbLink {
     /// acked lately (its log lines don't count: they say nothing about the
     /// app's lines being read).
     pub fn is_connected(&self) -> bool {
-        self.alive.load(Ordering::Relaxed)
-            && !self.health.is_zombie()
-            && clawdmeter_core::unix_now() - self.last_rx.load(Ordering::Relaxed) < SILENT_SECS
+        self.down_reason().is_none()
+    }
+
+    /// Why [`is_connected`](Self::is_connected) is false, if it is.
+    pub fn down_reason(&self) -> Option<String> {
+        down_reason(&self.alive, &self.health, &self.last_rx, "the port closed (unplugged or the board restarted)")
     }
 
     /// Let go of the port: the reader stops within one read timeout (100 ms)
@@ -532,7 +567,7 @@ mod tests {
         link.write(br#"{"ag":[]}"#).await.unwrap();
         assert_eq!(got.recv().await.as_deref(), Some(r#"{"s":3,"ok":true}"#), "one line per write");
         assert_eq!(got.recv().await.as_deref(), Some(r#"{"ag":[]}"#));
-        assert!(link.is_connected().await);
+        assert_eq!(link.down_reason().await, None);
         link.close().await;
     }
 

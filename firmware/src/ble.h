@@ -11,6 +11,11 @@ enum ble_state_t {
 void ble_init(void);
 void ble_tick(void);
 ble_state_t ble_get_state(void);
+// An encrypted link to the owner is up. A central with a stale bond (it
+// still has keys the board dropped) connects, fails encryption and leaves
+// every few seconds: the UI waits for this, so it doesn't flicker.
+bool ble_link_secure(void);
+bool ble_has_bond(void);   // some machine is bonded (BLE can come back by itself)
 const char* ble_get_device_name(void);
 const char* ble_get_mac_address(void);
 void ble_clear_bonds(void);

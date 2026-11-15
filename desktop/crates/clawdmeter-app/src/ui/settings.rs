@@ -194,6 +194,9 @@ fn diagnostics_text(snap: Option<&StatusSnapshot>, info: Option<&FirmwareInfo>, 
         if let Some(up) = i.up {
             out.push(format!("Encendido hace: {} h {} min", up / 3600, up / 60 % 60));
         }
+        if let Some(rst) = i.rst.as_deref().filter(|r| !r.is_empty()) {
+            out.push(format!("Último reinicio: {rst}"));
+        }
         if let Some(heap) = i.heap.filter(|h| *h > 0) {
             out.push(format!("Memoria libre: {} KB", heap / 1024));
         }

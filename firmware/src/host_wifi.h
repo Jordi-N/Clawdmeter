@@ -20,6 +20,7 @@ void host_wifi_tick(void (*on_line)(const char* line));
 // A parsed `wifi` command. Stores it now; radio changes land on the next tick.
 void host_wifi_apply(const WifiCmd* cmd);
 bool host_wifi_client(void);           // an authenticated TCP host is attached
+bool host_wifi_has_creds(void);        // a network is stored (the app can come over WiFi)
 void host_wifi_send(const char* line); // JSON line to that host, if any
 WifiSt host_wifi_state(void);
 // The status object {"st":...,"ip":...,"ssid":...}; 0 when compiled out.

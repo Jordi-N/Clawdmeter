@@ -677,8 +677,8 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         if let Some(l) = &link {
             if now - last_link_check >= LINK_CHECK_EVERY {
                 last_link_check = now;
-                if !l.is_connected().await {
-                    log::info!("device disconnected, reconnecting...");
+                if let Some(why) = l.down_reason().await {
+                    log::info!("device disconnected ({why}), reconnecting...");
                     link = None;
                     device_events = None;
                     link_state = LinkState::Searching;
@@ -723,7 +723,8 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     }
                     Err(e) => {
                         log::warn!("write failed: {e}");
-                        if !l.is_connected().await {
+                        if let Some(why) = l.down_reason().await {
+                            log::info!("device disconnected ({why}), reconnecting...");
                             link = None;
                             device_events = None;
                             link_state = LinkState::Searching;

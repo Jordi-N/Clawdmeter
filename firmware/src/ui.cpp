@@ -52,6 +52,7 @@ static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
 static lv_obj_t* pair_lines[4]; // its lines: heading, two steps, the hold note
 static PairHint  pair_hint = PAIR_HINT_NORMAL;
+static bool      pair_waiting = false;   // ui_set_pair_waiting
 static uint32_t  pair_hint_since = 0;
 #define PAIR_CLEARED_SHOW_MS 8000   // "Ready to pair" stays this long
 static lv_obj_t* bar_session;
@@ -344,6 +345,7 @@ static void apply_pair_text(void) {
     // Only the touch hold talks back; the PWR hint stays as it is.
     if (!pwr && pair_hint == PAIR_HINT_HOLDING) note = PAIR_TEXT_HOLDING;
     else if (!pwr && pair_hint == PAIR_HINT_CLEARED) lines = PAIR_TEXT_CLEARED;
+    else if (pair_waiting) lines = PAIR_TEXT_WAITING;
     for (int i = 0; i < 3; i++) lv_label_set_text(pair_lines[i], lines[i]);
     lv_label_set_text(pair_lines[3], note);
     lv_obj_set_style_text_color(pair_lines[3], pair_hint == PAIR_HINT_NORMAL ? COL_DIM : COL_ACCENT, 0);
@@ -383,6 +385,12 @@ static void build_pair_group(lv_obj_t* parent) {
 }
 
 bool ui_pair_hint_visible(void) { return view_state == 0; }
+
+void ui_set_pair_waiting(bool waiting) {
+    if (waiting == pair_waiting) return;
+    pair_waiting = waiting;
+    apply_pair_text();
+}
 
 void ui_set_pair_hint(PairHint hint) {
     if (hint == pair_hint) return;

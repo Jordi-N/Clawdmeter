@@ -7,6 +7,7 @@ __attribute__((weak)) const char* board_hal_rev(void) { return ""; }
 
 // Weak defaults: the sim and boards that don't say.
 __attribute__((weak)) unsigned long board_hal_free_heap(void) { return 0; }
+__attribute__((weak)) const char* board_hal_reset_reason(void) { return ""; }
 __attribute__((weak)) void sound_hal_set_level(int) {}
 
 // Weak default: boards without a PMU that can cut the power.
