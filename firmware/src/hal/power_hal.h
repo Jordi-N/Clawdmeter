@@ -1,4 +1,5 @@
 #pragma once
+#include <stddef.h>
 
 // Power / battery / power-button abstraction.
 //
@@ -34,3 +35,10 @@ bool power_hal_shutdown(void);
 // 90 %), 2 stops at 95 % and resumes at 90 %. No-op on boards without a
 // charger the firmware can set (weak default in board_info_default.cpp).
 void power_hal_set_battery_care(int mode);
+
+// Optional diagnostics. Battery voltage in mV (-1 unknown or no battery), and
+// one short board-written status for the periodic health log ("bat 80 % 3950
+// mV, charger cc, pmu 38 C"; returns its length, 0 when the board has none).
+// Weak defaults in board_info_default.cpp.
+int    power_hal_battery_mv(void);
+size_t power_hal_health(char* buf, size_t cap);

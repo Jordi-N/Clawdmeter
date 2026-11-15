@@ -35,3 +35,29 @@ const char* board_hal_reset_reason(void) {
     default:                return "other";
     }
 }
+
+#include "../../hal/board_info_hal.h"
+#include <esp_heap_caps.h>
+bool board_hal_heap(BoardHeap* h) {
+    h->free       = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    h->min_free   = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    h->largest    = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    h->psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    h->psram_min  = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    return true;
+}
+
+// RTC slow memory isn't cleared by a panic, watchdog or software reset; the
+// magic tells a kept value from power-on garbage. Read before setup() runs.
+#include <esp_attr.h>
+#define UPTIME_MAGIC 0xC1A3D0B7u
+static RTC_NOINIT_ATTR uint32_t rtc_magic;
+static RTC_NOINIT_ATTR uint32_t rtc_uptime_s;
+static const long prev_uptime = rtc_magic == UPTIME_MAGIC ? (long)rtc_uptime_s : -1;
+
+void board_hal_note_uptime(unsigned long seconds) {
+    rtc_uptime_s = (uint32_t)seconds;
+    rtc_magic = UPTIME_MAGIC;
+}
+
+long board_hal_prev_uptime(void) { return prev_uptime; }

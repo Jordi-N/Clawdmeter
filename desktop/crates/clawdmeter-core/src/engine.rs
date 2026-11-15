@@ -25,6 +25,8 @@ pub const ACTIVITY_MIN_INTERVAL: i64 = 5;
 /// `e`/`es` ride along for this long after the event (s), so a device that
 /// reconnects or reboots later doesn't react to an old event.
 pub const EVENT_FRESH_SECS: i64 = 60;
+/// A live hook event this far from its timestamp (s) is logged as late.
+pub const LATE_EVENT_SECS: i64 = 30;
 /// Agents writes go out at most this often when the list changes (s).
 pub const AGENTS_MIN_INTERVAL: i64 = 1;
 /// While sessions are listed, the agents write is repeated this often (s), so
@@ -171,6 +173,8 @@ pub struct Engine {
     sent_ag_at: i64,
     /// The key of the agents write handed out by `next_write`.
     pending_ag: Option<String>,
+    /// When a late hook event was last logged (one line a minute at most).
+    late_logged_at: i64,
 }
 
 fn utc(now: i64) -> DateTime<Utc> {
@@ -213,6 +217,7 @@ impl Engine {
             sent_ag: None,
             sent_ag_at: i64::MIN / 2,
             pending_ag: None,
+            late_logged_at: i64::MIN / 2,
         }
     }
 
@@ -251,6 +256,13 @@ impl Engine {
 
     /// One live hook event.
     pub fn on_hook_event(&mut self, ev: &HookEvent, now: i64) {
+        // Live events arrive within a tick; a big lag is a stalled tail, a
+        // sleep or a clock problem.
+        let lag = now - ev.ts;
+        if !(-LATE_EVENT_SECS..=LATE_EVENT_SECS).contains(&lag) && now - self.late_logged_at >= 60 {
+            self.late_logged_at = now;
+            log::info!("hook event {:?} is {lag}s off its timestamp (late or clock skew)", ev.kind);
+        }
         if ev.kind.sends_messages() {
             match ev.account.as_ref().and_then(|a| self.settings.config_dirs.iter().find(|d| *d == a)) {
                 Some(d) => self.accounts.entry(d.clone()).or_default().note_activity(ev.ts),
@@ -354,9 +366,14 @@ impl Engine {
 
     /// Where this account's next reading would come from at `now`.
     fn source(&self, dir: &PathBuf, now: i64) -> Source {
+        self.source_why(dir, now).0
+    }
+
+    /// [`Engine::source`] and the rule that picked it.
+    fn source_why(&self, dir: &PathBuf, now: i64) -> (Source, &'static str) {
         let empty = AccountState::default();
-        match probe::choose_source(self.accounts.get(dir).unwrap_or(&empty), self.unattributed_activity, now) {
-            Source::Probe if !self.claude_found => Source::Usage,
+        match probe::choose_source_why(self.accounts.get(dir).unwrap_or(&empty), self.unattributed_activity, now) {
+            (Source::Probe, _) if !self.claude_found => (Source::Usage, "no claude CLI for the probe"),
             s => s,
         }
     }
@@ -403,18 +420,27 @@ impl Engine {
         let reason = self.poll_due(now)?;
         let accounts: Vec<PathBuf> =
             self.settings.config_dirs.iter().filter(|d| self.account_due(d, now).0 <= now).cloned().collect();
-        let plans = accounts
-            .iter()
-            .map(|d| match self.source(d, now) {
-                Source::Probe => ProbePlan::Probe {
-                    usage_fallback: self.accounts.get(d).is_none_or(|a| a.backoff.remaining(now).is_none()),
-                },
+        let sources: Vec<(Source, &'static str)> = accounts.iter().map(|d| self.source_why(d, now)).collect();
+        let mut plans = Vec::with_capacity(accounts.len());
+        for (d, (source, why)) in accounts.iter().zip(sources) {
+            let st = self.accounts.entry(d.clone()).or_default();
+            let plan = match source {
+                Source::Probe => ProbePlan::Probe { usage_fallback: st.backoff.remaining(now).is_none() },
                 Source::Usage => ProbePlan::Usage,
                 Source::NotStarted(r) => ProbePlan::Known(r),
-            })
-            .collect();
-        for d in &accounts {
-            self.accounts.entry(d.clone()).or_default().last_attempt_at = Some(now);
+            };
+            // The rule changes rarely (a window starts or ends): log it then.
+            if st.source_why != Some(why) {
+                let kind = match &plan {
+                    ProbePlan::Probe { .. } => "probe",
+                    ProbePlan::Usage => "idle source",
+                    ProbePlan::Known(_) => "no call",
+                };
+                log::info!("{}: source {kind} ({why})", d.display());
+                st.source_why = Some(why);
+            }
+            st.last_attempt_at = Some(now);
+            plans.push(plan);
         }
         self.in_flight = accounts.clone();
         Some(PollPlan { reason, accounts, plans })
@@ -432,9 +458,18 @@ impl Engine {
             if !self.in_flight.contains(&dir) {
                 st.last_attempt_at = Some(now);
             }
+            if let Ok(new) = &r.result {
+                for (level, note) in crate::usage::reading_notes(st.last.as_ref(), new, now) {
+                    log::log!(level, "{}: {note}", dir.display());
+                }
+            }
+            let (misses, strikes) = (st.misses, st.backoff.strikes());
             st.record_polled(now, r);
             if let (Some(left), Some(e)) = (st.backoff.remaining(now), &st.last_error) {
-                log::info!("{}: {e}; not polling it for {left}s", dir.display());
+                let strike = st.backoff.strikes();
+                log::info!("{}: {e}; not polling it for {left}s (strike {strike})", dir.display());
+            } else if st.last_error.is_none() && misses > 0 {
+                log::info!("{}: usage back after {misses} misses ({strikes} backoff strikes cleared)", dir.display());
             }
         }
         // Every configured account's latest answer is a login problem.
@@ -452,9 +487,13 @@ impl Engine {
             self.accounts.iter().filter_map(|(k, a)| a.last.as_ref().map(|r| (k.clone(), r.session_pct()))).collect();
         let prev_active = self.active.clone();
         self.active = self.selector.choose(&sessions);
-        if self.active != prev_active && self.settings.config_dirs.len() > 1 {
-            if let Some(a) = &self.active {
-                log::info!("active plan: {}", a.display());
+        if self.active != prev_active {
+            // The rate math follows one account: another one's numbers would
+            // read as a jump (or a reset).
+            self.rate = RateTracker::default();
+            if let Some(a) = self.active.as_ref().filter(|_| self.settings.config_dirs.len() > 1) {
+                let prev = prev_active.as_ref().map_or("none".to_owned(), |p| p.display().to_string());
+                log::info!("active plan: {} (was {prev}; its session % rose last, or is highest)", a.display());
             }
         }
         // Only numbers read in this cycle for the shown account are a real
@@ -465,7 +504,9 @@ impl Engine {
         if active_fresh {
             if let Some(r) = self.active_reading() {
                 let pct = r.session_pct();
-                self.rate.sample(now, pct, false);
+                if self.rate.sample(now, pct, false) == crate::rate::SampleEvent::Reset {
+                    log::info!("rate: shown account's session dropped to {pct}%: reset");
+                }
             }
         }
         self.in_flight.clear();

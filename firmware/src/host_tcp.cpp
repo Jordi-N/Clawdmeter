@@ -36,6 +36,13 @@ static char want_auth[WIFI_MAC_LEN + 1];
 static const char* tick_key = nullptr;
 static void (*tick_on_line)(const char*) = nullptr;
 static bool just_promoted = false;   // pending -> active inside this read
+static TcpStats stats = {};
+static uint32_t authed_at_ms = 0;    // when the active client authenticated
+
+const TcpStats* tcp_host_stats(void) { return &stats; }
+
+static int read_err = 0;             // why pump() last returned false: errno, 0 = peer closed
+static unsigned long active_secs(void) { return (unsigned long)((millis() - authed_at_ms) / 1000); }
 
 static void close_client(TcpPeer* c) {
     if (c->fd >= 0) close(c->fd);
@@ -97,7 +104,9 @@ bool tcp_host_authed(void) { return active.fd >= 0; }
 
 void tcp_host_send(const char* line) {
     if (active.fd >= 0 && !write_line(active.fd, line)) {
-        Serial.println("WiFi: TCP client write failed, dropping it");
+        stats.write_fail++;
+        Serial.printf("WiFi: TCP client write failed (errno %d) after %lus, dropping it\n",
+            errno, active_secs());
         close_client(&active);
     }
 }
@@ -127,28 +136,34 @@ static bool answer_hello(const char* line) {
 static bool on_pending_line(const char* line, void*) {
     if (!want_auth[0]) {
         if (answer_hello(line)) return true;
+        stats.auth_fail++;
         Serial.println("WiFi: TCP hello refused, closing");
         close_client(&pending);
         return false;
     }
     if (!wifi_auth_check(line, want_auth) || !write_line(pending.fd, "{\"auth\":\"ok\"}")) {
+        stats.auth_fail++;
         Serial.println("WiFi: TCP auth failed, closing");
         close_client(&pending);
         return false;
     }
     want_auth[0] = '\0';
+    if (active.fd >= 0) Serial.printf("WiFi: TCP host replaced after %lus\n", active_secs());
     close_client(&active);
     active = pending;          // the rest of this read is already its data
     active.since_ms = millis();
     just_promoted = true;
     pending.fd = -1;
     linebuf_reset(&pending.lb);
-    Serial.println("WiFi: TCP host authenticated");
+    stats.authed++;
+    authed_at_ms = active.since_ms;
+    Serial.printf("WiFi: TCP host authenticated (#%lu)\n", (unsigned long)stats.authed);
     return false;              // stop: the remaining bytes go to active below
 }
 
 static bool on_active_line(const char* line, void*) {
     active.since_ms = millis();   // for the active client: its last line
+    stats.last_line_ms = active.since_ms ? active.since_ms : 1;
     tick_on_line(line);
     return active.fd >= 0;     // the handler may have dropped the client
 }
@@ -158,8 +173,12 @@ static bool pump(TcpPeer* c, bool (*on_line)(const char*, void*)) {
     char buf[256];
     for (int i = 0; i < 4 && c->fd >= 0; i++) {
         ssize_t n = recv(c->fd, buf, sizeof(buf), 0);
-        if (n == 0) return false;
-        if (n < 0) return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+        if (n == 0) { read_err = 0; return false; }
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return true;
+            read_err = errno;
+            return false;
+        }
         size_t used = 0;
         while (used < (size_t)n && c->fd >= 0) {
             just_promoted = false;
@@ -175,8 +194,16 @@ void tcp_host_tick(const char* key, void (*on_line)(const char* line)) {
     tick_key = key;
     tick_on_line = on_line;
 
-    int fd = accept(listen_fd, nullptr, nullptr);
+    struct sockaddr_in peer;
+    socklen_t peer_len = sizeof(peer);
+    memset(&peer, 0, sizeof(peer));
+    int fd = accept(listen_fd, (struct sockaddr*)&peer, &peer_len);
     if (fd >= 0) {
+        stats.accepts++;
+        const uint8_t* a = (const uint8_t*)&peer.sin_addr.s_addr;   // network order
+        Serial.printf("WiFi: TCP connection from %u.%u.%u.%u (#%lu)\n",
+            (unsigned)a[0], (unsigned)a[1], (unsigned)a[2], (unsigned)a[3], (unsigned long)stats.accepts);
+        if (pending.fd >= 0) Serial.println("WiFi: TCP handshake in progress replaced");
         close_client(&pending);   // one handshake at a time; newest wins
         set_nonblocking(fd);
         int one = 1;
@@ -188,17 +215,25 @@ void tcp_host_tick(const char* key, void (*on_line)(const char* line)) {
 
     if (pending.fd >= 0) {
         if (millis() - pending.since_ms >= AUTH_TIMEOUT_MS) {
+            stats.auth_timeout++;
             Serial.println("WiFi: TCP auth timeout, closing");
             close_client(&pending);
         } else if (!pump(&pending, on_pending_line)) {
+            // Closed by the peer, during the handshake or right after it.
+            if (pending.fd < 0) stats.closed++;
+            Serial.printf("WiFi: TCP %s (errno %d)\n", pending.fd >= 0 ? "client left during the handshake"
+                                                    : "host left right after authenticating", read_err);
             close_client(pending.fd >= 0 ? &pending : &active);
         }
     }
     if (active.fd >= 0 && !pump(&active, on_active_line)) {
-        Serial.println("WiFi: TCP host disconnected");
+        stats.closed++;
+        Serial.printf("WiFi: TCP host disconnected after %lus (%s %d)\n", active_secs(),
+            read_err ? "errno" : "closed by peer", read_err);
         close_client(&active);
     } else if (active.fd >= 0 && millis() - active.since_ms >= IDLE_TIMEOUT_MS) {
-        Serial.println("WiFi: TCP host silent for 45 s, dropping it");
+        stats.idle++;
+        Serial.printf("WiFi: TCP host silent for 45 s, dropping it (after %lus)\n", active_secs());
         close_client(&active);
     }
 }

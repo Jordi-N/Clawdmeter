@@ -26,6 +26,13 @@ WifiSt host_wifi_state(void);
 // The status object {"st":...,"ip":...,"ssid":...}; 0 when compiled out.
 size_t host_wifi_status(char* buf, size_t cap);
 bool host_wifi_take_changed(void);     // status changed since the last call
+// Counters since boot as one JSON object, for the serial `info`: try/fail
+// join attempts and failures, lost links that dropped once up, up seconds
+// the link has been up (-1 down), tcp accepted connections, auth/authf/autht
+// handshakes ok/refused/timed out, closed/idle/wrf authenticated hosts that
+// left, went silent or failed a write, rxage seconds since the host's last
+// line (-1 none). Returns the length; 0 when compiled out or it doesn't fit.
+size_t host_wifi_diag(char* buf, size_t cap);
 
 // Radio layer under host_wifi.cpp: boards/wifi_esp/wifi_radio_esp.cpp on hardware,
 // boards/sim/wifi_radio_sim.cpp in the simulator.

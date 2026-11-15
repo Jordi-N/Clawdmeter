@@ -13,3 +13,10 @@ __attribute__((weak)) void sound_hal_set_level(int) {}
 // Weak default: boards without a PMU that can cut the power.
 __attribute__((weak)) bool power_hal_shutdown(void) { return false; }
 __attribute__((weak)) void power_hal_set_battery_care(int) {}
+
+// Weak defaults: boards that can't report heap, retained uptime or power diagnostics.
+__attribute__((weak)) bool board_hal_heap(BoardHeap* out) { *out = BoardHeap{}; return false; }
+__attribute__((weak)) void board_hal_note_uptime(unsigned long) {}
+__attribute__((weak)) long board_hal_prev_uptime(void) { return -1; }
+__attribute__((weak)) int power_hal_battery_mv(void) { return -1; }
+__attribute__((weak)) size_t power_hal_health(char*, size_t) { return 0; }

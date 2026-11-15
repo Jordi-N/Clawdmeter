@@ -29,7 +29,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -76,34 +76,47 @@ pub fn anchor(st: &AccountState) -> Option<i64> {
 /// Pick the source for one account at `now`. `unattributed` is the latest
 /// prompt or tool activity that couldn't be tied to an account.
 pub fn choose_source(st: &AccountState, unattributed: Option<i64>, now: i64) -> Source {
-    let Some(last) = &st.last else { return Source::Usage };
+    choose_source_why(st, unattributed, now).0
+}
+
+/// [`choose_source`] with the rule that picked it, for the log.
+pub fn choose_source_why(st: &AccountState, unattributed: Option<i64>, now: i64) -> (Source, &'static str) {
+    let Some(last) = &st.last else { return (Source::Usage, "no reading yet") };
     // Spend-capped accounts: the headers carry no spend cap.
     if last.is_spend_only() {
-        return Source::Usage;
+        return (Source::Usage, "spend-capped account");
     }
     let anchor = anchor(st).unwrap_or(now);
     if let Some(reset) = last.session.as_ref().and_then(|w| w.resets_at).map(|t| t.timestamp()) {
         if reset - now > PROBE_MARGIN_SECS {
-            return Source::Probe;
+            return (Source::Probe, "window running (known reset ahead)");
         }
         if reset > now {
-            return Source::Usage;
+            return (Source::Usage, "within 5 min of the session reset");
         }
     }
     if let Some(first) = st.first_activity {
         // That activity started a window; it runs WINDOW_SECS from there.
         // A probe that keeps missing on that inference alone stops: the
         // idle source answers instead.
-        let probe = now < first + WINDOW_SECS - PROBE_MARGIN_SECS && st.probe_misses < PROBE_MISS_LIMIT;
-        return if probe { Source::Probe } else { Source::Usage };
+        return if now >= first + WINDOW_SECS - PROBE_MARGIN_SECS {
+            (Source::Usage, "window inferred from activity is ending")
+        } else if st.probe_misses >= PROBE_MISS_LIMIT {
+            (Source::Usage, "probe kept missing on a window inferred from activity")
+        } else {
+            (Source::Probe, "own activity started a window")
+        };
     }
     // The known window just ended and nothing here started another: show
     // it over at once. After that, `/usage` keeps watch (a window can start
     // on another computer, where no hook of ours runs).
-    if last.window_started() && unattributed.is_none_or(|t| t <= anchor) {
-        return Source::NotStarted(not_started(last, now));
+    if last.window_started() {
+        if unattributed.is_none_or(|t| t <= anchor) {
+            return (Source::NotStarted(not_started(last, now)), "window ended with no activity since");
+        }
+        return (Source::Usage, "window ended; later activity names no account");
     }
-    Source::Usage
+    (Source::Usage, "no window known")
 }
 
 /// `last` with the session window over: not started, and any weekly window
@@ -215,14 +228,26 @@ pub fn poll_idle(
     home: &Path,
     now: DateTime<Utc>,
 ) -> Result<UsageReading, UsageError> {
+    idle_via(claude, config_dir, home, now).0
+}
+
+/// [`poll_idle`] with the source that answered, for the log.
+fn idle_via(
+    claude: Option<&Path>,
+    config_dir: &Path,
+    home: &Path,
+    now: DateTime<Utc>,
+) -> (Result<UsageReading, UsageError>, &'static str) {
     match (crate::oauth::poll_endpoint(config_dir, home, now), claude) {
-        (Some(Err(e @ (UsageError::TokenExpired | UsageError::TokenRejected))), Some(c)) => {
-            log::info!("{}: {e}; asking claude /usage", config_dir.display());
-            usage::poll_account(c, config_dir, home, now)
+        (Some(Err(UsageError::TokenExpired)), Some(c)) => {
+            (usage::poll_account(c, config_dir, home, now), "claude /usage (token expired)")
         }
-        (Some(r), _) => r,
-        (None, Some(c)) => usage::poll_account(c, config_dir, home, now),
-        (None, None) => Err(UsageError::Spawn("no Claude Code sign-in or claude CLI found".into())),
+        (Some(Err(UsageError::TokenRejected)), Some(c)) => {
+            (usage::poll_account(c, config_dir, home, now), "claude /usage (token rejected)")
+        }
+        (Some(r), _) => (r, "endpoint"),
+        (None, Some(c)) => (usage::poll_account(c, config_dir, home, now), "claude /usage (no token)"),
+        (None, None) => (Err(UsageError::Spawn("no Claude Code sign-in or claude CLI found".into())), "none"),
     }
 }
 
@@ -246,7 +271,9 @@ impl From<Result<UsageReading, UsageError>> for Polled {
 }
 
 /// Read one account by `plan`. `cwd` is where the probe runs; without a
-/// `claude` binary the probe can't run and the idle source answers.
+/// `claude` binary the probe can't run and the idle source answers. Logs
+/// one line per call: the source that answered, how long it took and the
+/// reading or the miss.
 pub fn poll(
     claude: Option<&Path>,
     config_dir: &Path,
@@ -255,16 +282,41 @@ pub fn poll(
     plan: &Plan,
     now: DateTime<Utc>,
 ) -> Polled {
+    let start = Instant::now();
+    let (polled, via) = poll_via(claude, config_dir, home, cwd, plan, now);
+    if let Some(via) = via {
+        let ms = start.elapsed().as_millis();
+        match &polled.result {
+            Ok(r) => log::info!("{}: usage via {via} in {ms} ms: {}", config_dir.display(), usage::summary(r)),
+            Err(e) => log::info!("{}: usage via {via} failed in {ms} ms: {e}", config_dir.display()),
+        }
+    }
+    polled
+}
+
+/// [`poll`] and the source that answered (`None`: no call).
+fn poll_via(
+    claude: Option<&Path>,
+    config_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    plan: &Plan,
+    now: DateTime<Utc>,
+) -> (Polled, Option<&'static str>) {
     let probe = |result, probe_missed| Polled { result, idle: false, probe_missed };
     match (plan, claude) {
-        (Plan::Known(r), _) => probe(Ok(r.clone()), false),
-        (Plan::Usage, _) | (Plan::Probe { .. }, None) => poll_idle(claude, config_dir, home, now).into(),
+        (Plan::Known(r), _) => (probe(Ok(r.clone()), false), None),
+        (Plan::Usage, _) | (Plan::Probe { .. }, None) => {
+            let (r, via) = idle_via(claude, config_dir, home, now);
+            (r.into(), Some(via))
+        }
         (Plan::Probe { usage_fallback }, Some(c)) => match run_probe(c, config_dir, home, cwd, usage::CLI_TIMEOUT) {
-            Ok(r) => probe(Ok(r), false),
-            Err(e) if e.is_auth() || !usage_fallback => probe(Err(e), true),
+            Ok(r) => (probe(Ok(r), false), Some("probe")),
+            Err(e) if e.is_auth() || !usage_fallback => (probe(Err(e), true), Some("probe")),
             Err(e) => {
-                log::info!("{}: probe missed ({e}); asking the usage endpoint", config_dir.display());
-                Polled { result: poll_idle(claude, config_dir, home, now), idle: true, probe_missed: true }
+                log::info!("{}: probe missed ({e}); asking the idle source", config_dir.display());
+                let (r, via) = idle_via(claude, config_dir, home, now);
+                (Polled { result: r, idle: true, probe_missed: true }, Some(via))
             }
         },
     }

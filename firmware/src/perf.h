@@ -16,3 +16,13 @@ void perf_attach(lv_display_t* disp, uint32_t refr_period_ms);   // once, after 
 void perf_begin(PerfWindow w);          // closes any other open window first
 void perf_end(PerfWindow w);            // no-op unless w is the open window
 void perf_print(void);                  // the `perf` serial command
+
+// System health for the serial log and `info`. health_loop() runs once per
+// loop with that loop's work time (without its sleep) and LVGL's share; it
+// logs stalls (>= 500 ms, rate-limited), heap low-water alarms (once per
+// threshold) and a health line every 10 minutes. health_print() logs that
+// line now (end of setup: the baseline). health_info() writes the extra
+// `info` keys (",\"boots\":..."), returning their length.
+void   health_loop(uint32_t loop_ms, uint32_t lv_ms);
+void   health_print(const char* why);
+size_t health_info(char* buf, size_t cap);

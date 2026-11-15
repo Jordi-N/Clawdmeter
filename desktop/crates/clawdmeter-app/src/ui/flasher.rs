@@ -154,7 +154,15 @@ fn until_free<T>(mut open: impl FnMut() -> Result<T, DeviceError>) -> Result<T, 
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(500));
             }
-            r => return r,
+            r => {
+                // A port that frees up late shows how long the handoff took;
+                // one that never does, that something kept holding it.
+                if tries > 0 {
+                    let how = if r.is_ok() { "free" } else { "still failing" };
+                    log::info!("port {how} after {tries} busy retries ({} ms)", tries * 500);
+                }
+                return r;
+            }
         }
     }
 }

@@ -16,6 +16,15 @@ pub fn offered(latest: &str) -> bool {
 /// Download and launch the update; on `Ok` (the new version) the caller
 /// quits the app so the installer can replace it. Blocking.
 pub fn install(paths: &Paths) -> Result<String, String> {
+    log::info!("self-update: checking for a release newer than {}", crate::version());
+    let result = find_and_launch(paths);
+    if let Err(e) = &result {
+        log::warn!("self-update: not installed: {e}");
+    }
+    result
+}
+
+fn find_and_launch(paths: &Paths) -> Result<String, String> {
     let repo =
         Settings::load(paths).map(|s| s.release_repo).unwrap_or_else(|_| clawdmeter_flash::DEFAULT_RELEASE_REPO.into());
     let r = release::release_for_app(&repo, crate::version()).map_err(|e| e.to_string())?;
@@ -58,7 +67,7 @@ mod imp {
             .creation_flags(0x0800_0000 | 0x0000_0200) // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
             .spawn()
             .map_err(|e| format!("No se pudo lanzar el instalador: {e}"))?;
-        log::info!("self-update: installing {} after quitting", msi.display());
+        log::info!("self-update: installing {} ({}) after quitting", r.tag, msi.display());
         Ok(())
     }
 }

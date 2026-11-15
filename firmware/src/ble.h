@@ -1,4 +1,5 @@
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 
 enum ble_state_t {
@@ -21,6 +22,16 @@ const char* ble_get_mac_address(void);
 void ble_clear_bonds(void);
 void ble_print_status(void);   // serial `ble`: state, bonds, owner, peers
 void ble_disconnect_all(void); // serial `disconnect`: drop every link
+// Link counters since boot, as one JSON object for `info` and `ble`:
+// con/drop connects and disconnects, noenc links that left before encryption
+// (not closed by us; the stale-bond pattern), encf auth completed without
+// encryption, adv/advf advertising starts and failures, rx accepted writes,
+// rxrej writes refused (unencrypted or non-owner), cut writes longer than the
+// buffer, ovr lines lost to a full queue, maxw longest write (B), rsn last
+// disconnect reason, rxage seconds since the last accepted write (-1 none),
+// and rssi (dBm) / mtu of the encrypted link when there is one.
+// Returns the length, 0 if it doesn't fit (or in the simulator).
+size_t ble_diag_json(char* buf, size_t cap);
 // false: stop advertising and drop every link (the app is on USB or WiFi);
 // true: advertise again. Idempotent; the pair gesture still clears bonds.
 void ble_set_radio(bool on);

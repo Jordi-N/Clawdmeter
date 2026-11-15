@@ -16,3 +16,19 @@ unsigned long board_hal_free_heap(void);
 // ("power", "sw", "panic", "wdt", "brownout", "usb", "deepsleep"; "" when
 // the board can't tell). Must be a static string.
 const char* board_hal_reset_reason(void);
+
+// Heap figures for the health log and `info` (bytes). Internal RAM: free,
+// lowest free since boot, largest free block (fragmentation); PSRAM: free and
+// lowest free (0 without PSRAM). Returns false, all zero, when the board can't
+// tell (weak default).
+struct BoardHeap {
+    unsigned long free, min_free, largest, psram_free, psram_min;
+};
+bool board_hal_heap(BoardHeap* out);
+
+// Uptime that survives a reset which keeps the chip powered (panic, watchdog,
+// software, sometimes brownout): main.cpp notes it every second, and the next
+// boot reads how long the previous run lasted. -1 when unknown (power-on, or
+// a board without retained RAM; weak default).
+void board_hal_note_uptime(unsigned long seconds);
+long board_hal_prev_uptime(void);

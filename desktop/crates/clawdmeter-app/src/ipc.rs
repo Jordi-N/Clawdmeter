@@ -345,8 +345,10 @@ pub fn claim_usb(paths: &Paths, secs: i64) {
         read_status(paths).is_some_and(|s| s.alive(clawdmeter_core::unix_now()) && s.transport == Some(Transport::Usb))
     };
     if !on_usb() {
+        log::debug!("USB claimed for {secs} s; the daemon isn't on USB");
         return;
     }
+    log::info!("USB claimed for {secs} s; waiting for the daemon to let go");
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(3) && on_usb() {
         std::thread::sleep(Duration::from_millis(100));
@@ -358,6 +360,9 @@ pub fn claim_usb(paths: &Paths, secs: i64) {
     }
     // The link's reader thread closes its handle within one read timeout.
     std::thread::sleep(Duration::from_millis(300));
+    // The claim counts from now: the wait above must not eat into the time
+    // the caller asked for, or the daemon reopens the port mid-probe.
+    hold_usb(paths, secs);
 }
 
 /// The window holds the serial port at `now`.

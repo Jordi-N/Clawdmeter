@@ -105,6 +105,8 @@ pub struct EventTail<T = HookEvent> {
     /// Tell files apart by inode too (Unix). Windows has no stable file id
     /// in std, so there the first line alone tells a rolled log apart.
     inodes: bool,
+    /// Live lines that didn't parse, for the log.
+    bad_lines: u64,
 }
 
 /// What tells one log file from the next: its inode where there is one, and
@@ -170,7 +172,7 @@ impl<T> EventTail<T> {
             .unwrap_or_default();
         let inodes = cfg!(unix);
         let ident = meta.as_ref().map(|m| FileIdent::of(&path, m, inodes)).unwrap_or_default();
-        (EventTail { path, parse, offset: len, partial: String::new(), ident, inodes }, seed)
+        (EventTail { path, parse, offset: len, partial: String::new(), ident, inodes, bad_lines: 0 }, seed)
     }
 
     /// True when the log (or its rolled copy) exists: the hooks are installed.
@@ -236,8 +238,18 @@ impl<T> EventTail<T> {
         self.partial.push_str(chunk);
         while let Some(i) = self.partial.find('\n') {
             let line: String = self.partial.drain(..=i).collect();
-            if let Some(ev) = (self.parse)(line.trim_end()) {
-                out.push(ev);
+            let line = line.trim_end();
+            match (self.parse)(line) {
+                Some(ev) => out.push(ev),
+                None if line.is_empty() => {}
+                None => {
+                    // The 1st, 2nd, 4th, 8th… so a broken writer can't flood the log.
+                    self.bad_lines += 1;
+                    if self.bad_lines.is_power_of_two() {
+                        let clip: String = line.chars().take(120).collect();
+                        log::warn!("{}: unreadable line #{}: {clip:?}", self.path.display(), self.bad_lines);
+                    }
+                }
             }
         }
     }

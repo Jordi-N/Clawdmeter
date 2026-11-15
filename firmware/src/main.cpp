@@ -117,10 +117,26 @@ static void my_touch_cb(lv_indev_t* indev, lv_indev_data_t* data) {
 }
 
 // Parse a JSON line into UsageData (payload.cpp holds the pure parser).
+// Failures are counted (`perr` in `info`) and logged at most every 30 s,
+// with the length and first bytes: a cut BLE write (over 511 B) shows here.
+static uint32_t parse_errors = 0;
+static uint32_t parse_err_logged_ms = 0;
+static uint32_t parse_err_held = 0;
+
 static bool parse_json(const char* json, UsageData* out) {
     const char* err = nullptr;
     if (!payload_parse(json, out, &err)) {
-        Serial.printf("JSON parse error: %s\n", err ? err : "?");
+        parse_errors++;
+        const uint32_t now = millis();
+        if (parse_err_logged_ms == 0 || now - parse_err_logged_ms >= 30000) {
+            Serial.printf("JSON parse error #%lu: %s (len %u, %lu held back) \"%.40s\"\n",
+                          (unsigned long)parse_errors, err ? err : "?", (unsigned)strlen(json),
+                          (unsigned long)parse_err_held, json);
+            parse_err_logged_ms = now;
+            parse_err_held = 0;
+        } else {
+            parse_err_held++;
+        }
         return false;
     }
     return true;
@@ -204,16 +220,27 @@ static const char* link_name(void);
 
 // One JSON line identifying this build, for the desktop flasher's first
 // detection probe and the app's diagnostics. env, ver, rev and link are
-// fixed; up (s), heap (bytes, 0 = unknown) and bat/chg/usb are extra.
+// fixed; up (s), heap (bytes, 0 = unknown) and bat/chg/usb are extra, and so
+// are the health keys (perf.h health_info): boots, crash (panic/wdt/brownout
+// boots), pup (previous run's uptime, -1 unknown), hmin/hblk (internal heap
+// low-water and largest block), psr (PSRAM free), lmax (worst loop ms),
+// stall (loops >= 500 ms), mv (battery mV, -1 unknown). perr counts payload
+// parse errors; ble and wdiag are the link counters (ble.h, host_wifi.h).
 static void send_info() {
     char w[96];
     const size_t wn = host_wifi_status(w, sizeof(w));   // 0 on boards without WiFi
+    char hk[160];
+    if (!health_info(hk, sizeof(hk))) hk[0] = '\0';
+    char bd[256], wd[224];
+    const size_t bn = ble_diag_json(bd, sizeof(bd));     // 0 in the simulator
+    const size_t wdn = host_wifi_diag(wd, sizeof(wd));   // 0 without WiFi
     Serial.printf("{\"env\":\"%s\",\"ver\":\"%s\",\"rev\":\"%s\",\"link\":\"%s\",\"up\":%lu,"
-                  "\"heap\":%lu,\"rst\":\"%s\",\"bat\":%d,\"chg\":%s,\"usb\":%s%s%s}\n",
+                  "\"heap\":%lu,\"rst\":\"%s\",\"bat\":%d,\"chg\":%s,\"usb\":%s%s,\"perr\":%lu%s%s%s%s%s%s}\n",
                   CLAWD_ENV, CLAWD_VERSION, board_hal_rev(), link_name(), (unsigned long)(millis() / 1000),
                   (unsigned long)board_hal_free_heap(), board_hal_reset_reason(), power_hal_battery_pct(),
                   power_hal_is_charging() ? "true" : "false", power_hal_is_vbus_in() ? "true" : "false",
-                  wn ? ",\"wifi\":" : "", wn ? w : "");
+                  hk, (unsigned long)parse_errors, wn ? ",\"wifi\":" : "", wn ? w : "", bn ? ",\"ble\":" : "",
+                  bn ? bd : "", wdn ? ",\"wdiag\":" : "", wdn ? wd : "");
 }
 
 static void check_serial_cmd() {
@@ -280,6 +307,11 @@ void setup() {
     Serial.begin(115200);
     delay(300);
     Serial.println("{\"ready\":true}");
+    // Boot banner, before any driver can hang or crash: which build, why the
+    // chip started, and how long the previous run lasted (-1: power-on or unknown).
+    boot_stats_init(board_hal_reset_reason());
+    Serial.printf("Boot #%lu: %s %s, reset %s, previous run %ld s, %lu crash boots so far\n", boot_count(),
+                  CLAWD_ENV, CLAWD_VERSION, board_hal_reset_reason(), board_hal_prev_uptime(), crash_count());
 
     board_init();
 
@@ -325,9 +357,10 @@ void setup() {
     director_init();    // rooms + beats; boots on the meters (home)
     clawd_prefs_init();  // the saved device settings, before the app says otherwise
 
-    Serial.printf("Reset reason: %s\n", board_hal_reset_reason());
+    if (!buf1 || !buf2) Serial.println("LVGL: draw buffer allocation failed");
     Serial.printf("Dashboard ready (%s, %dx%d) %lu ms after boot, waiting for data on BLE...\n",
         board_caps().name, W, H, (unsigned long)millis());
+    health_print("boot");   // the baseline the periodic lines compare against
 }
 
 static ble_state_t last_ble_state = BLE_STATE_INIT;
@@ -617,6 +650,7 @@ static void report_wifi(void) {
 }
 
 void loop() {
+    const uint32_t loop_t0 = millis();
     idle_tick();
     // Nothing is drawn while the panel is dark (sleep or rest): the redraws
     // would only cost CPU. Input is still read, so a touch or press wakes it.
@@ -629,7 +663,9 @@ void loop() {
             if (!dark) lv_obj_invalidate(lv_screen_active());
         }
     }
+    const uint32_t lv_t0 = millis();
     const uint32_t lv_wait = lv_timer_handler();
+    const uint32_t lv_ms = millis() - lv_t0;
     ui_tick_anim();
     agents_view_tick(millis());
     ble_tick();
@@ -786,6 +822,8 @@ void loop() {
             }
         }
     }
+
+    health_loop(millis() - loop_t0, lv_ms);   // stalls, heap alarms, the 10-min health line
 
     // Sleep only as long as LVGL has nothing to do (1-5 ms), not a fixed 5 ms
     // on top of every frame.

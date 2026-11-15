@@ -22,9 +22,10 @@ use std::time::{Duration, Instant};
 use btleplug::api::{Central, CentralEvent};
 use btleplug::platform::PeripheralId;
 use futures::StreamExt;
+use log::Level;
 use tokio::sync::mpsc;
 
-use crate::{accept, describe, Bluetooth};
+use crate::{accept, describe, log_repeated, Bluetooth};
 
 /// How the device showed up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +117,7 @@ async fn watch_once(bt: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
     let mut events = match adapter.events().await {
         Ok(s) => s,
         Err(e) => {
-            log::debug!("wakeup watcher: no event stream: {e}");
+            log_repeated(Level::Warn, &format!("ble: wakeup watcher has no event stream: {e}"));
             return;
         }
     };
@@ -126,7 +127,7 @@ async fn watch_once(bt: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
             ev = events.next() => match ev {
                 Some(ev) => ev,
                 None => {
-                    log::debug!("wakeup watcher: event stream ended");
+                    log_repeated(Level::Info, "ble: wakeup watcher: event stream ended; reopening");
                     break;
                 }
             },
@@ -134,10 +135,20 @@ async fn watch_once(bt: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
                 // A dead connection can leave its event stream hanging
                 // rather than ending it: the match channels stay open
                 // while the session is alive. Reopen on the replacement.
-                log::debug!("wakeup watcher: connection replaced; reopening");
+                log::info!("ble: wakeup watcher: connection replaced; reopening");
                 break;
             }
         };
+        if let CentralEvent::DeviceDisconnected(id) = &ev {
+            // The OS's own record of a drop, next to the daemon's.
+            if let Ok(p) = adapter.peripheral(id).await {
+                let c = describe(p).await;
+                if accept(c.name.as_deref(), c.has_service) {
+                    log::info!("ble: OS reports {} disconnected", c.key);
+                }
+            }
+            continue;
+        }
         let Some((id, kind)) = sighting(&ev) else { continue };
         if kind == Sighting::Advertising {
             let now = Instant::now();
@@ -165,6 +176,7 @@ async fn watch_once(bt: &Bluetooth, tx: &mpsc::UnboundedSender<Wake>) {
     // after the lookup: one that succeeds on a manager someone else just
     // put in place of this stream's dead one has bumped it by then.
     if bt.adapter().await.is_err() || must_leak(opened_at, *losses.borrow()) {
+        log::info!("ble: wakeup watcher: leaking the event stream of a lost connection");
         std::mem::forget(events);
     }
 }

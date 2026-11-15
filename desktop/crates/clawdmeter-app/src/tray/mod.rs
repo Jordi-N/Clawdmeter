@@ -210,6 +210,7 @@ impl TrayApp {
     }
 
     fn handle(&mut self, cmd: AppCommand) -> bool {
+        log::info!("action: {}", action_name(&cmd));
         match cmd {
             AppCommand::Refresh => self.send(Command::RefreshNow),
             AppCommand::Reconnect => self.send(Command::Reconnect),
@@ -374,6 +375,22 @@ impl TrayApp {
     }
 }
 
+/// A menu or window command, for the log (never the WiFi password).
+fn action_name(cmd: &AppCommand) -> &'static str {
+    match cmd {
+        AppCommand::Refresh => "refresh now",
+        AppCommand::Reconnect => "reconnect",
+        AppCommand::Forget => "forget the device",
+        AppCommand::Mute(true) => "mute chimes",
+        AppCommand::Mute(false) => "unmute chimes",
+        AppCommand::Open(_) => "open the window",
+        AppCommand::CheckUpdate => "check for updates",
+        AppCommand::WifiSend { .. } => "send a WiFi network",
+        AppCommand::Power(_) => "device power",
+        AppCommand::Quit => "quit",
+    }
+}
+
 /// Daily firmware update check on its own thread (network I/O never blocks
 /// the tray). Writes the latest tag to the shared slot and the cache file.
 fn spawn_update_checker(paths: Paths, latest: Arc<Mutex<Option<String>>>, now_flag: Arc<AtomicBool>) {
@@ -391,7 +408,9 @@ fn spawn_update_checker(paths: Paths, latest: Arc<Mutex<Option<String>>>, now_fl
                     settings.map(|s| s.release_repo).unwrap_or_else(|| clawdmeter_flash::DEFAULT_RELEASE_REPO.into());
                 match clawdmeter_flash::release::release_for_app(&repo, crate::version()) {
                     Ok(r) => {
-                        log::info!("latest firmware release: {}", r.manifest.version);
+                        let v = &r.manifest.version;
+                        let offered = crate::self_update::offered(v);
+                        log::info!("latest release: {v} (this app {}; update offered: {offered})", crate::version());
                         let _ = std::fs::create_dir_all(&paths.cache_dir);
                         let _ = std::fs::write(ipc::latest_release_file(&paths), &r.manifest.version);
                         if let Ok(mut l) = latest.lock() {

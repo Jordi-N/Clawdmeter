@@ -27,6 +27,43 @@ static uint32_t last_charging_ms  = 0;
 static uint32_t last_pwr_ms       = 0;
 static int      care_mode         = 0;      // power_hal_set_battery_care
 static bool     charge_on         = true;   // the charger is enabled
+static int      cached_mv         = -1;     // battery voltage, -1 = no battery
+static int      chg_state         = -1;     // xpowers_chg_status_t, -1 = not read yet
+static int      low_logged        = 0;      // 1 low, 2 critical: each logged once until USB returns
+
+#define BAT_LOW_MV  3400   // roughly the last 5-10 %
+#define BAT_CRIT_MV 3300   // brownout territory under radio/panel load
+
+static const char* chg_name(int st) {
+    switch (st) {
+    case XPOWERS_AXP2101_CHG_TRI_STATE:  return "trickle";
+    case XPOWERS_AXP2101_CHG_PRE_STATE:  return "pre";
+    case XPOWERS_AXP2101_CHG_CC_STATE:   return "cc";
+    case XPOWERS_AXP2101_CHG_CV_STATE:   return "cv";
+    case XPOWERS_AXP2101_CHG_DONE_STATE: return "done";
+    case XPOWERS_AXP2101_CHG_STOP_STATE: return "stopped";
+    default:                             return "?";
+    }
+}
+
+// Why the PMU last turned on and off (REG 20h/21h bit flags). They describe
+// the last real power cycle: a chip reset (panic, watchdog) keeps the PMU on.
+static void log_power_sources(void) {
+    static const char* const on_bits[] = { "pwrkey", "irq-pin", "vbus", "charge", "battery", "en" };
+    static const char* const off_bits[] = { "pwrkey", "software", "pwrkey-low", "vsys-under",
+                                            "vbus-over", "dcdc-under", "dcdc-over", "over-temp" };
+    const int on = pmu.readRegister(XPOWERS_AXP2101_PWRON_STATUS);
+    const int off = pmu.readRegister(XPOWERS_AXP2101_PWROFF_STATUS);
+    char on_s[64] = "", off_s[96] = "";
+    for (int i = 0; i < 6; i++)
+        if (on >= 0 && (on & (1 << i)))
+            snprintf(on_s + strlen(on_s), sizeof(on_s) - strlen(on_s), " %s", on_bits[i]);
+    for (int i = 0; i < 8; i++)
+        if (off >= 0 && (off & (1 << i)))
+            snprintf(off_s + strlen(off_s), sizeof(off_s) - strlen(off_s), " %s", off_bits[i]);
+    Serial.printf("AXP2101: power-on source 0x%02x (%s), last power-off 0x%02x (%s)\n",
+                  on & 0xff, on_s[0] ? on_s + 1 : "none", off & 0xff, off_s[0] ? off_s + 1 : "none");
+}
 
 void power_hal_init(void) {
     if (!pmu.begin(Wire, AXP2101_ADDR, IIC_SDA, IIC_SCL)) {
@@ -38,6 +75,7 @@ void power_hal_init(void) {
 
     pmu.enableBattDetection();
     pmu.enableBattVoltageMeasure();
+    pmu.enableTemperatureMeasure();   // die temperature, for the health log
 
     // The AXP2101 estimates % from the battery voltage and can latch into a
     // bad state (frozen, or stuck near zero) that a power cycle doesn't
@@ -60,6 +98,26 @@ void power_hal_init(void) {
     cached_charging = pmu.isCharging();
     cached_vbus     = pmu.isVbusIn();
     cached_pct = pmu.getBatteryPercent();
+    cached_mv = pmu.isBatteryConnect() ? pmu.getBattVoltage() : -1;
+    chg_state = pmu.getChargerStatus();
+    log_power_sources();
+    Serial.printf("Power: boot on %s, battery %d %% %d mV, charger %s\n", cached_vbus ? "USB" : "battery",
+                  cached_pct, cached_mv, chg_name(chg_state));
+}
+
+// USB plug/unplug, and the low-voltage warnings on battery (each once until
+// USB is back).
+static void log_transitions(bool vbus_was) {
+    if (cached_vbus != vbus_was)
+        Serial.printf("Power: USB %s, battery %d %% %d mV\n", cached_vbus ? "plugged" : "unplugged",
+                      cached_pct, cached_mv);
+    if (cached_vbus) {
+        low_logged = 0;
+    } else if (cached_mv > 0 && low_logged < 2 && cached_mv < (low_logged ? BAT_CRIT_MV : BAT_LOW_MV)) {
+        low_logged++;
+        Serial.printf("Power: battery %s, %d mV %d %%\n",
+                      low_logged == 2 ? "critical (brownout risk)" : "low", cached_mv, cached_pct);
+    }
 }
 
 // Mode 2 keeps 90-95 %: the charger stops at 95 % and starts again at 90 %
@@ -72,7 +130,8 @@ static void care_tick(void) {
     charge_on = want;
     if (want) pmu.enableCellbatteryCharge();
     else pmu.disableCellbatteryCharge();
-    Serial.printf("Battery care: charging %s at %d %%\n", want ? "resumed" : "paused", cached_pct);
+    Serial.printf("Battery care: charging %s at %d %% %d mV\n", want ? "resumed" : "paused", cached_pct,
+                  cached_mv);
 }
 
 void power_hal_set_battery_care(int mode) {
@@ -86,17 +145,28 @@ void power_hal_set_battery_care(int mode) {
 }
 
 void power_hal_tick(void) {
+    if (!pmu_ok) return;   // no PMU: don't poll a missing device on the shared bus
     uint32_t now = millis();
 
     if (now - last_charging_ms >= CHARGING_POLL_MS) {
         last_charging_ms = now;
+        const bool vbus_was = cached_vbus;
         cached_charging = pmu.isCharging();
         cached_vbus     = pmu.isVbusIn();
+        if (cached_vbus != vbus_was) log_transitions(vbus_was);
     }
     if (now - last_battery_ms >= BATTERY_POLL_MS) {
         last_battery_ms = now;
         cached_pct = pmu.getBatteryPercent();
-        if (pmu_ok) care_tick();
+        cached_mv = pmu.isBatteryConnect() ? pmu.getBattVoltage() : -1;
+        const int st = pmu.getChargerStatus();
+        if (st != chg_state) {
+            Serial.printf("Power: charger %s -> %s, battery %d %% %d mV%s\n", chg_name(chg_state),
+                          chg_name(st), cached_pct, cached_mv, charge_on ? "" : " (paused by battery care)");
+            chg_state = st;
+        }
+        log_transitions(cached_vbus);
+        care_tick();
     }
     if (now - last_pwr_ms >= PWR_POLL_MS) {
         last_pwr_ms = now;
@@ -136,4 +206,14 @@ bool power_hal_shutdown(void) {
 bool power_hal_pwr_released(void) {
     if (pwr_released_flag) { pwr_released_flag = false; return true; }
     return false;
+}
+
+int power_hal_battery_mv(void) { return cached_mv; }
+
+size_t power_hal_health(char* buf, size_t cap) {
+    if (!pmu_ok) return 0;
+    const int n = snprintf(buf, cap, "bat %d %% %d mV, %s, charger %s%s, pmu %.0f C", cached_pct, cached_mv,
+                           cached_vbus ? "usb" : "on battery", chg_name(chg_state),
+                           charge_on ? "" : " (care pause)", pmu.getTemperature());
+    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
 }

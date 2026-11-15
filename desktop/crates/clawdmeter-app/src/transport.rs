@@ -19,7 +19,7 @@ use clawdmeter_core::wifi::{
     auth_line, auth_mac, hello_line, is_key, parse_device_line, same_secret, DeviceLine, Secret, Transport, APP_LABEL,
     DEVICE_LABEL, HEARTBEAT_LINE, MDNS_SERVICE, PORT,
 };
-use clawdmeter_flash::device::LinkPort;
+use clawdmeter_flash::device::{parse_info_output, FirmwareInfo, LinkPort};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
@@ -35,6 +35,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// dead (the board lost power or the network), even if the socket or port
 /// still looks open.
 const SILENT_SECS: i64 = 45;
+/// A USB write slower than this is logged: the port's driver is struggling.
+const SLOW_WRITE: Duration = Duration::from_secs(1);
 
 /// How long an mDNS browse waits for the device to answer.
 const BROWSE_TIME: Duration = Duration::from_secs(3);
@@ -75,6 +77,15 @@ impl Link {
             Link::Ble(l) => (!l.is_connected().await).then(|| "Bluetooth link lost".to_owned()),
             Link::Wifi(l) => l.down_reason(),
             Link::Usb(l) => l.down_reason(),
+        }
+    }
+
+    /// The board's latest `info` reply, once. USB only: that link asks for
+    /// it when it opens.
+    pub fn take_info(&self) -> Option<FirmwareInfo> {
+        match self {
+            Link::Usb(l) => l.take_info(),
+            Link::Ble(_) | Link::Wifi(_) => None,
         }
     }
 
@@ -215,6 +226,8 @@ pub struct UsbLink {
     /// Unix second of the device's last line.
     last_rx: Arc<AtomicI64>,
     health: WriteHealth,
+    /// The board's latest `info` reply, until the daemon takes it.
+    info: Arc<std::sync::Mutex<Option<FirmwareInfo>>>,
 }
 
 /// Dropped without `close()` (a lost link): the reader thread still stops
@@ -289,6 +302,7 @@ impl UsbLink {
         let mut buf = [0u8; 512];
         let end = Instant::now() + HANDSHAKE_TIMEOUT;
         let mut acked = false;
+        let mut first_info = None;
         while !acked && Instant::now() < end {
             let n = match reader.read(&mut buf) {
                 Ok(n) => n,
@@ -302,6 +316,7 @@ impl UsbLink {
                     acked = true;
                 } else if is_info(&line) {
                     log::info!("device info: {line}");
+                    first_info = parse_info_output(&line);
                 } else if let Some(ev) = line_event(&line) {
                     let _ = tx.send(ev);
                 }
@@ -319,7 +334,8 @@ impl UsbLink {
         writer.flush()?;
         let alive = Arc::new(AtomicBool::new(true));
         let last_rx = Arc::new(AtomicI64::new(clawdmeter_core::unix_now()));
-        let (up, seen) = (alive.clone(), last_rx.clone());
+        let info = Arc::new(std::sync::Mutex::new(first_info));
+        let (up, seen, slot, name) = (alive.clone(), last_rx.clone(), info.clone(), port.clone());
         std::thread::Builder::new().name("clawdmeter-usb".into()).spawn(move || {
             while up.load(Ordering::Relaxed) {
                 match reader.read(&mut buf) {
@@ -331,6 +347,11 @@ impl UsbLink {
                             }
                             if is_info(&line) {
                                 log::info!("device info: {line}");
+                                if let Some(i) = parse_info_output(&line) {
+                                    if let Ok(mut s) = slot.lock() {
+                                        *s = Some(i);
+                                    }
+                                }
                             }
                             if let Some(ev) = line_event(&line) {
                                 if tx.send(ev).is_err() {
@@ -340,13 +361,26 @@ impl UsbLink {
                         }
                     }
                     Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-                    Err(_) => break, // unplugged
+                    Err(e) => {
+                        // Unplugged, or the board restarted.
+                        log::info!("USB read on {name} failed: {e}");
+                        break;
+                    }
                 }
             }
             up.store(false, Ordering::Relaxed);
+            // If this line never follows a close, the thread is stuck in a
+            // read and still holds the COM port.
+            log::info!("USB reader on {name} stopped; releasing its port handle");
         })?;
-        let link =
-            UsbLink { writer: std::sync::Mutex::new(writer), port, alive, last_rx, health: WriteHealth::default() };
+        let link = UsbLink {
+            writer: std::sync::Mutex::new(writer),
+            port,
+            alive,
+            last_rx,
+            health: WriteHealth::default(),
+            info,
+        };
         Ok((link, events))
     }
 
@@ -359,10 +393,15 @@ impl UsbLink {
         line.push(b'\n');
         line.extend_from_slice(data);
         line.push(b'\n');
+        let start = Instant::now();
         let r = match self.writer.lock() {
             Ok(mut w) => w.write_all(&line).and_then(|()| w.flush()),
             Err(_) => Err(io::Error::other("USB writer poisoned")),
         };
+        let took = start.elapsed();
+        if took >= SLOW_WRITE {
+            log::warn!("USB write on {} took {} ms", self.port, took.as_millis());
+        }
         self.health.record(r.is_ok());
         r
     }
@@ -383,6 +422,11 @@ impl UsbLink {
     /// and the port closes once the link is dropped.
     pub fn close(&self) {
         self.alive.store(false, Ordering::Relaxed);
+    }
+
+    /// The board's latest `info` reply, once.
+    pub fn take_info(&self) -> Option<FirmwareInfo> {
+        self.info.lock().ok().and_then(|mut s| s.take())
     }
 
     /// The serial port's name.

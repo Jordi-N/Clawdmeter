@@ -90,6 +90,73 @@ static volatile bool data_ready = false;
 static volatile bool has_received_data = false;
 static char mac_str[18];
 
+// --- Link diagnostics (ble_diag_json, serial `ble`) -------------------------
+//
+// Counters are written by NimBLE host-task callbacks and read on the loop
+// task; they're diagnostics, so plain 32-bit stores are enough.
+struct LinkSlot {
+    uint16_t handle;    // CONN_HANDLE_NONE: free
+    uint32_t at_ms;     // connect time, for the duration on disconnect
+    uint32_t rx_ms;     // last accepted RX write (0: none yet)
+    bool secure;        // encrypted
+    bool reported;      // "encrypted, rssi=..." line printed
+    bool silent;        // "no RX write" line printed for this silence
+};
+static LinkSlot links[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];
+static uint32_t n_connects = 0, n_drops = 0;
+static uint32_t n_unsecured_drops = 0;   // left before encryption (not by us)
+static uint32_t n_enc_fail = 0;          // auth completed without encryption
+static uint32_t n_adv = 0, n_adv_fail = 0;
+static uint32_t n_rx = 0, n_rx_rejected = 0, n_rx_truncated = 0, n_rx_overrun = 0;
+static uint16_t max_write = 0;
+static int last_reason = 0;
+static uint32_t last_rx_ms = 0;          // any link; 0: none since boot
+static uint8_t stale_streak = 0;         // links in a row dropped before encryption
+#define RX_SILENCE_MS 45000              // the app writes at least every 15 s
+#define NEAR_LIMIT_B  450                // a new longest write this long is logged
+
+static LinkSlot* link_find(uint16_t h) {
+    for (LinkSlot& l : links) if (l.handle == h) return &l;
+    return nullptr;
+}
+
+// link_secure follows the links: the owner's encrypted link leaving while an
+// unencrypted one stays must not keep the UI on "connected".
+static void update_link_secure() {
+    bool any = false;
+    for (const LinkSlot& l : links) if (l.handle != CONN_HANDLE_NONE && l.secure) any = true;
+    link_secure = any;
+}
+
+// True at most once per gap_ms for one `last` stamp: for lines that could
+// otherwise repeat on every write.
+static bool log_due(uint32_t* last, uint32_t gap_ms) {
+    const uint32_t now = millis();
+    if (*last && now - *last < gap_ms) return false;
+    *last = now ? now : 1;
+    return true;
+}
+
+// NimBLE reports HCI disconnect reasons as 0x200 + the HCI error code.
+static const char* reason_name(int reason) {
+    if (reason < 0x200 || reason >= 0x300) return "host";
+    switch (reason - 0x200) {
+    case 0x05: return "auth failure";
+    case 0x06: return "key missing";
+    case 0x08: return "supervision timeout";
+    case 0x13: return "closed by peer";
+    case 0x16: return "closed by us";
+    case 0x1a: return "unsupported feature";
+    case 0x22: return "LL response timeout";
+    case 0x28: return "instant passed";
+    case 0x3b: return "unacceptable params";
+    case 0x3d: return "MIC failure";
+    case 0x3e: return "failed to establish";
+    default:   return "other";
+    }
+}
+static const int REASON_LOCAL = 0x216;   // we called disconnect()
+
 // --- Single-owner lock -----------------------------------------------------
 //
 // The board is a BLE peripheral that any central in range could connect to and
@@ -178,6 +245,8 @@ static void start_advertising() {
     adv->setScanResponseData(scanResp);
     adv->enableScanResponse(true);
     bool ok = adv->start();
+    n_adv++;
+    if (!ok) n_adv_fail++;
     // Only reflect ADVERTISING in the UI state when no client is connected.
     // With MAX_CONNECTIONS=2, onConnect re-advertises to fill the second slot;
     // without this guard the UI would flip CONNECTED → ADVERTISING on every
@@ -193,10 +262,13 @@ static void start_advertising() {
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* s, NimBLEConnInfo& info) override {
         state = BLE_STATE_CONNECTED;
-        if (info.isEncrypted()) link_secure = true;
-        Serial.printf("BLE: connected from %s (active=%u)\n",
+        n_connects++;
+        LinkSlot* l = link_find(CONN_HANDLE_NONE);
+        if (l) *l = { info.getConnHandle(), millis(), 0, info.isEncrypted(), false, false };
+        update_link_secure();
+        Serial.printf("BLE: connected from %s (active=%u, connect #%lu)\n",
             info.getAddress().toString().c_str(),
-            (unsigned)s->getConnectedCount());
+            (unsigned)s->getConnectedCount(), (unsigned long)n_connects);
         // Log negotiated link timing — the difference between guessing and
         // knowing when debugging disconnects (e.g. reason=520 supervision
         // timeouts are only explainable next to the negotiated timeout).
@@ -223,6 +295,13 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     }
 
     void onDisconnect(NimBLEServer* s, NimBLEConnInfo& info, int reason) override {
+        n_drops++;
+        last_reason = reason;
+        LinkSlot* l = link_find(info.getConnHandle());
+        const bool was_secure = l && l->secure;
+        const uint32_t secs = l ? (millis() - l->at_ms) / 1000 : 0;
+        if (l) l->handle = CONN_HANDLE_NONE;
+        update_link_secure();
         // Only flip the UI state to DISCONNECTED when the last client leaves.
         if (s->getConnectedCount() == 0) {
             state = BLE_STATE_DISCONNECTED;
@@ -233,8 +312,30 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         // reuses conn handles, so stale state would leak onto the next link.
         if (param_fix_handle == info.getConnHandle()) param_fix_handle = CONN_HANDLE_NONE;
         if (param_fix_spent  == info.getConnHandle()) param_fix_spent  = CONN_HANDLE_NONE;
-        Serial.printf("BLE: disconnected (reason=%d, remaining=%u)\n",
-            reason, (unsigned)s->getConnectedCount());
+        Serial.printf("BLE: disconnected (reason=%d %s, after %lus, %s, remaining=%u)\n",
+            reason, reason_name(reason), (unsigned long)secs,
+            was_secure ? "encrypted" : "never encrypted", (unsigned)s->getConnectedCount());
+        // Stale bond: the computer keeps keys the board dropped, so it
+        // connects, fails encryption and leaves, over and over. Our own
+        // disconnects (radio off, non-owner) don't count.
+        if (was_secure) {
+            stale_streak = 0;
+        } else if (reason != REASON_LOCAL) {
+            n_unsecured_drops++;
+            if (stale_streak < 255) stale_streak++;
+            if (stale_streak == 3 || stale_streak % 10 == 0)
+                Serial.printf("BLE: %u links in a row dropped before encryption: "
+                    "stale pairing on the computer? (remove it there, then pair again)\n",
+                    (unsigned)stale_streak);
+        }
+    }
+
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo& info) override {
+        // Writes longer than MTU-3 need the long-write procedure; a small
+        // MTU next to failed or cut writes explains them.
+        (void)info;
+        Serial.printf("BLE: MTU %u (single write up to %u B)\n",
+            (unsigned)mtu, (unsigned)(mtu > 3 ? mtu - 3 : 0));
     }
 
     // Centrals re-negotiate parameters mid-connection. Windows in particular
@@ -275,6 +376,15 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             param_fix_at_ms  = millis() + 2000;
         }
         if (id == ZERO_ADDR) return;
+        // Only an encrypted link may claim the owner lock or be judged by it:
+        // a failed pairing leaves no bond, and its address can be a random
+        // one that, saved as the owner, would lock out the real machine.
+        if (!info.isEncrypted()) {
+            n_enc_fail++;
+            Serial.printf("BLE: encryption failed for %s (#%lu): the computer keeps an old pairing (pair again)\n",
+                id.c_str(), (unsigned long)n_enc_fail);
+            return;
+        }
         if (!owner_set) {
             claim_owner(id);
         } else if (strcmp(id.c_str(), owner_addr) != 0) {
@@ -283,8 +393,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             server->disconnect(info);
             return;
         }
-        if (info.isEncrypted()) link_secure = true;
-        else Serial.println("BLE: encryption failed: the computer keeps an old pairing (pair again)");
+        LinkSlot* l = link_find(info.getConnHandle());
+        if (l) l->secure = true;
+        update_link_secure();
     }
 
 };
@@ -295,23 +406,55 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         // owner machine. Another machine's app in range is ignored so the
         // display never rotates to a foreign account. The first encrypted writer
         // claims ownership when none is set yet (e.g. a fresh pairing).
+        static uint32_t rej_log = 0, cut_log = 0, ovr_log = 0;
         std::string id = info.getIdAddress().toString();
         if (!info.isEncrypted()) {
-            Serial.println("BLE: dropping RX write from unencrypted link");
+            n_rx_rejected++;
+            if (log_due(&rej_log, 30000))
+                Serial.printf("BLE: dropping RX write from unencrypted link (%lu so far)\n",
+                    (unsigned long)n_rx_rejected);
             return;
         }
         if (!owner_set && id != ZERO_ADDR) {
             claim_owner(id);
         }
         if (owner_set && strcmp(id.c_str(), owner_addr) != 0) {
-            Serial.printf("BLE: dropping RX write from non-owner %s\n", id.c_str());
+            n_rx_rejected++;
+            if (log_due(&rej_log, 30000))
+                Serial.printf("BLE: dropping RX write from non-owner %s (%lu so far)\n",
+                    id.c_str(), (unsigned long)n_rx_rejected);
             return;
         }
         std::string val = chr->getValue();
-        size_t len = std::min(val.length(), (size_t)(BLE_BUF_SIZE - 1));
+        const size_t raw = val.length();
+        size_t len = std::min(raw, (size_t)(BLE_BUF_SIZE - 1));
+        n_rx++;
+        const uint32_t now = millis();
+        last_rx_ms = now ? now : 1;
+        LinkSlot* l = link_find(info.getConnHandle());
+        if (l) {
+            if (l->silent)
+                Serial.printf("BLE: RX writes resumed after %lus\n",
+                    (unsigned long)((now - l->rx_ms) / 1000));
+            l->rx_ms = last_rx_ms;
+            l->silent = false;
+        }
+        if (raw > len) {
+            n_rx_truncated++;
+            if (log_due(&cut_log, 30000))
+                Serial.printf("BLE: RX write %u B cut to %u B (%lu so far)\n",
+                    (unsigned)raw, (unsigned)len, (unsigned long)n_rx_truncated);
+        }
+        if (raw > max_write) {
+            max_write = (uint16_t)std::min(raw, (size_t)0xFFFF);
+            if (raw >= NEAR_LIMIT_B)
+                Serial.printf("BLE: RX write %u B, near the %u B buffer\n",
+                    (unsigned)raw, (unsigned)(BLE_BUF_SIZE - 1));
+        }
+        bool overrun = false;
         portENTER_CRITICAL(&rx_lock);
         // Full: the oldest line gives way (the app resends every few seconds).
-        if (rx_count == RX_SLOTS) { rx_head = (rx_head + 1) % RX_SLOTS; rx_count--; }
+        if (rx_count == RX_SLOTS) { rx_head = (rx_head + 1) % RX_SLOTS; rx_count--; overrun = true; }
         char* slot = rx_buf[(rx_head + rx_count) % RX_SLOTS];
         memcpy(slot, val.c_str(), len);
         slot[len] = '\0';
@@ -319,6 +462,13 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
         data_ready = true;
         portEXIT_CRITICAL(&rx_lock);
         has_received_data = true;
+        if (overrun) {
+            // The loop didn't drain the queue in time (a long redraw or a stall).
+            n_rx_overrun++;
+            if (log_due(&ovr_log, 30000))
+                Serial.printf("BLE: RX queue full, oldest line dropped (%lu so far)\n",
+                    (unsigned long)n_rx_overrun);
+        }
     }
 };
 
@@ -335,6 +485,7 @@ class ReqCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 void ble_init(void) {
+    for (LinkSlot& l : links) l.handle = CONN_HANDLE_NONE;
     NimBLEDevice::init(DEVICE_NAME);
     NimBLEDevice::setSecurityAuth(true, false, true);  // bonding, no MITM, SC
 
@@ -428,6 +579,55 @@ void ble_tick(void) {
             server->updateConnParams(h, 12, 24, 0, DESIRED_TIMEOUT);
         }
     }
+    // Once per encrypted link: signal strength and MTU, the first suspects
+    // when a link keeps dropping. Then one line when the app goes quiet on it.
+    if (!server) return;
+    for (LinkSlot& l : links) {
+        if (l.handle == CONN_HANDLE_NONE || !l.secure) continue;
+        if (!l.reported) {
+            l.reported = true;
+            int8_t rssi = 0;
+            const int rc = ble_gap_conn_rssi(l.handle, &rssi);
+            NimBLEConnInfo ci = server->getPeerInfoByHandle(l.handle);
+            if (rc == 0)
+                Serial.printf("BLE: link %s encrypted, rssi=%d dBm, mtu=%u\n",
+                    ci.getIdAddress().toString().c_str(), (int)rssi, (unsigned)ci.getMTU());
+            else
+                Serial.printf("BLE: link %s encrypted, rssi n/a (rc=%d), mtu=%u\n",
+                    ci.getIdAddress().toString().c_str(), rc, (unsigned)ci.getMTU());
+        }
+        if (l.rx_ms && !l.silent && millis() - l.rx_ms >= RX_SILENCE_MS) {
+            l.silent = true;
+            Serial.printf("BLE: encrypted link but no RX write for %us (app stalled?)\n",
+                (unsigned)(RX_SILENCE_MS / 1000));
+        }
+    }
+}
+
+size_t ble_diag_json(char* buf, size_t cap) {
+    const long rx_age = last_rx_ms ? (long)((millis() - last_rx_ms) / 1000) : -1;
+    int n = snprintf(buf, cap,
+        "{\"con\":%lu,\"drop\":%lu,\"noenc\":%lu,\"encf\":%lu,\"adv\":%lu,\"advf\":%lu,"
+        "\"rx\":%lu,\"rxrej\":%lu,\"cut\":%lu,\"ovr\":%lu,\"maxw\":%u,\"rsn\":%d,\"rxage\":%ld",
+        (unsigned long)n_connects, (unsigned long)n_drops, (unsigned long)n_unsecured_drops,
+        (unsigned long)n_enc_fail, (unsigned long)n_adv, (unsigned long)n_adv_fail,
+        (unsigned long)n_rx, (unsigned long)n_rx_rejected, (unsigned long)n_rx_truncated,
+        (unsigned long)n_rx_overrun, (unsigned)max_write, last_reason, rx_age);
+    if (n <= 0 || (size_t)n + 1 >= cap) return 0;
+    // Signal and MTU of the first encrypted link, when there is one.
+    for (const LinkSlot& l : links) {
+        if (!server || l.handle == CONN_HANDLE_NONE || !l.secure) continue;
+        int8_t rssi = 0;
+        if (ble_gap_conn_rssi(l.handle, &rssi) != 0) break;
+        const int m = snprintf(buf + n, cap - n, ",\"rssi\":%d,\"mtu\":%u", (int)rssi,
+            (unsigned)server->getPeerInfoByHandle(l.handle).getMTU());
+        if (m > 0 && (size_t)(n + m) + 1 < cap) n += m;
+        else buf[n] = '\0';
+        break;
+    }
+    buf[n++] = '}';
+    buf[n] = '\0';
+    return (size_t)n;
 }
 
 ble_state_t ble_get_state(void) {
@@ -467,9 +667,8 @@ void ble_clear_bonds(void) {
     }
     clear_owner();  // release ownership so the board can be handed to another machine
     Serial.printf("BLE: bonds cleared (remaining=%d)\n", NimBLEDevice::getNumBonds());
-    if (state == BLE_STATE_CONNECTED) {
-        server->disconnect(server->getPeerInfo(0).getConnHandle());
-    }
+    // Every link: with two centrals, dropping only peer 0 kept the other.
+    ble_disconnect_all();
     need_advertise = true;
 }
 
@@ -484,6 +683,8 @@ void ble_print_status(void) {
             ci.getAddress().toString().c_str(), ci.getIdAddress().toString().c_str(),
             ci.isEncrypted() ? 1 : 0, ci.isBonded() ? 1 : 0);
     }
+    char d[256];
+    if (ble_diag_json(d, sizeof(d))) Serial.printf("BLE diag: %s\n", d);
 }
 
 void ble_disconnect_all(void) {

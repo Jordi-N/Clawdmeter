@@ -158,7 +158,7 @@ impl std::fmt::Display for UsageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UsageError::Spawn(e) => write!(f, "could not run claude: {e}"),
-            UsageError::Timeout => write!(f, "claude /usage timed out"),
+            UsageError::Timeout => write!(f, "claude timed out (killed after {}s)", CLI_TIMEOUT.as_secs()),
             UsageError::BadOutput(e) => write!(f, "unexpected claude output: {e}"),
             UsageError::NotLoggedIn(e) => write!(f, "not logged in: {e}"),
             UsageError::NotSubscription => write!(f, "account is not on a subscription plan"),
@@ -826,6 +826,86 @@ pub fn rate_limit_from_debug_text(text: &str, now: DateTime<Utc>) -> Option<i64>
     (left > 0).then_some(left)
 }
 
+/// One reading in one log line: `session 32% (resets 11-15 18:00Z) · week 20% (…)`.
+pub fn summary(r: &UsageReading) -> String {
+    let fmt = |name: &str, pct: u32, reset: Option<DateTime<Utc>>| match reset {
+        Some(t) => format!("{name} {pct}% (resets {})", t.format("%m-%d %H:%MZ")),
+        None => format!("{name} {pct}% (no reset)"),
+    };
+    let session = match &r.session {
+        Some(w) => fmt("session", w.pct, w.resets_at),
+        None => "session not started".to_owned(),
+    };
+    let mut parts = vec![session];
+    if let Some(w) = &r.week {
+        parts.push(fmt("week", w.pct, w.resets_at));
+    }
+    if let Some(sp) = &r.spend {
+        parts.push(fmt("spend", sp.pct, sp.resets_at));
+    }
+    if r.overage {
+        parts.push("overage".into());
+    }
+    if r.limited() {
+        parts.push("limited".into());
+    }
+    parts.join(" · ")
+}
+
+/// How far a reset may move within one window and still be the same one
+/// (s): `/usage` prints reset times to the minute, sometimes the hour.
+pub const RESET_JITTER_SECS: i64 = 15 * 60;
+
+/// What a new reading says next to the previous one, for the log. Resets
+/// and windows starting or ending are `Info`; odd numbers are `Warn` and
+/// start with "anomaly": a window over 100 %, a percent that drops before
+/// its reset, a reset that moves within one window, a session reset more
+/// than 5 h ahead. Each shows once, when it first appears.
+pub fn reading_notes(prev: Option<&UsageReading>, new: &UsageReading, now: i64) -> Vec<(log::Level, String)> {
+    use log::Level::{Info, Warn};
+    let t = |r: Option<DateTime<Utc>>| r.map_or("none".to_owned(), |d| d.format("%m-%d %H:%MZ").to_string());
+    let mut out = Vec::new();
+    let windows = [
+        ("session", prev.and_then(|p| p.session.as_ref()), new.session.as_ref()),
+        ("week", prev.and_then(|p| p.week.as_ref()), new.week.as_ref()),
+    ];
+    for (name, old, cur) in windows {
+        if let Some(c) = cur.filter(|c| c.pct > 100 && old.is_none_or(|o| o.pct <= 100)) {
+            out.push((Warn, format!("anomaly: {name} at {}% (over 100, overage {})", c.pct, new.overage)));
+        }
+        match (old, cur) {
+            (Some(o), None) => out.push((Info, format!("{name} window ended at {}%", o.pct))),
+            (None, Some(c)) if prev.is_some() => {
+                out.push((Info, format!("{name} window started: {}%, resets {}", c.pct, t(c.resets_at))));
+            }
+            (Some(o), Some(c)) => {
+                let (was, next) = (o.resets_at.map(|d| d.timestamp()), c.resets_at.map(|d| d.timestamp()));
+                if was.is_some_and(|r| r > now) {
+                    // Still the same window: it only grows, and its reset stays put.
+                    if c.pct < o.pct {
+                        let m = format!("anomaly: {name} dropped {}% -> {}% before its reset", o.pct, c.pct);
+                        out.push((Warn, m));
+                    }
+                    if was.zip(next).is_some_and(|(a, b)| (a - b).abs() > RESET_JITTER_SECS) {
+                        let (from, to) = (t(o.resets_at), t(c.resets_at));
+                        out.push((Warn, format!("anomaly: {name} reset moved {from} -> {to} within one window")));
+                    }
+                } else if was.is_some() && was != next {
+                    let next_reset = t(c.resets_at);
+                    out.push((Info, format!("{name} reset: {}% -> {}%, next reset {next_reset}", o.pct, c.pct)));
+                }
+            }
+            _ => {}
+        }
+    }
+    let reset = new.session.as_ref().and_then(|w| w.resets_at);
+    let prev_reset = prev.and_then(|p| p.session.as_ref()).and_then(|w| w.resets_at);
+    if reset != prev_reset && reset.is_some_and(|r| r.timestamp() - now > crate::probe::WINDOW_SECS + 60) {
+        out.push((Warn, format!("anomaly: session reset {} is more than 5 h ahead", t(reset))));
+    }
+    out
+}
+
 /// Consecutive misses after which an account's numbers count as stale.
 pub const STALE_AFTER_MISSES: u32 = 3;
 
@@ -859,6 +939,9 @@ pub struct AccountState {
     pub first_activity: Option<i64>,
     /// Consecutive probe misses (see [`crate::probe::PROBE_MISS_LIMIT`]).
     pub probe_misses: u32,
+    /// The rule that picked the last poll's source
+    /// ([`crate::probe::choose_source_why`]), so the log names changes only.
+    pub source_why: Option<&'static str>,
 }
 
 impl AccountState {
@@ -936,6 +1019,37 @@ impl AccountState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_notes_flag_odd_readings_once() {
+        use log::Level::{Info, Warn};
+        let now = 1_791_930_000;
+        let w = |pct, reset: i64| Some(Window { pct, resets_at: DateTime::from_timestamp(reset, 0) });
+        let r = |session, week| UsageReading { session, week, ..Default::default() };
+        let anomalies = |n: &[(log::Level, String)]| n.iter().all(|(l, m)| *l == Warn && m.starts_with("anomaly"));
+        let a = r(w(40, now + 3600), w(10, now + 86_400));
+        // Same window, growing: nothing to say. Nor on the first reading.
+        assert!(reading_notes(Some(&a), &r(w(45, now + 3600), w(11, now + 86_400)), now).is_empty());
+        assert!(reading_notes(None, &a, now).is_empty());
+        // A drop before the reset, and a reset that jumps an hour.
+        let n = reading_notes(Some(&a), &r(w(30, now + 7200), w(10, now + 86_400)), now);
+        assert!(n.len() == 2 && anomalies(&n), "{n:?}");
+        // Over 100 %: once, when it first shows.
+        let over = r(w(101, now + 3600), w(10, now + 86_400));
+        let n = reading_notes(Some(&a), &over, now);
+        assert!(n.len() == 1 && anomalies(&n), "{n:?}");
+        assert!(reading_notes(Some(&over), &r(w(102, now + 3600), w(10, now + 86_400)), now).is_empty());
+        // A reset that passed is a reset; a window gone is one that ended.
+        let n = reading_notes(Some(&a), &r(w(2, now + 5 * 3600), w(10, now + 86_400)), now + 3600);
+        assert_eq!(n, vec![(Info, "session reset: 40% -> 2%, next reset 10-14 03:20Z".to_owned())]);
+        let n = reading_notes(Some(&a), &r(None, w(10, now + 86_400)), now + 3600);
+        assert_eq!(n, vec![(Info, "session window ended at 40%".to_owned())]);
+        // A session reset beyond five hours, said once.
+        let far = r(w(1, now + 6 * 3600), None);
+        let n = reading_notes(Some(&r(None, None)), &far, now);
+        assert!(n.len() == 2 && n[0].0 == Info && anomalies(&n[1..]), "{n:?}");
+        assert!(reading_notes(Some(&far), &far, now).is_empty());
+    }
 
     fn at(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)

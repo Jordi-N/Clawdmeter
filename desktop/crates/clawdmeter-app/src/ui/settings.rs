@@ -486,10 +486,15 @@ impl SettingsView {
                             std::thread::sleep(Duration::from_millis(500));
                         }
                         Err(e) => {
-                            log::info!("Device page probe on {port}: {e}");
+                            log::info!("Device page probe on {port}: {e} (after {tries} busy retries)");
                             break None;
                         }
-                        Ok(i) => break i,
+                        Ok(i) => {
+                            if tries > 0 {
+                                log::info!("Device page probe on {port}: port free after {tries} busy retries");
+                            }
+                            break i;
+                        }
                     }
                 };
                 (Some(port), info)

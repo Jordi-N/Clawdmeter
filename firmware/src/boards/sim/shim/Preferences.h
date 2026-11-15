@@ -19,5 +19,9 @@ public:
     size_t  putString(const char* key, const char* value);
     bool    getBool(const char* key, bool def = false) { return getUChar(key, def ? 1 : 0) != 0; }
     size_t  putBool(const char* key, bool value) { return putUChar(key, value ? 1 : 0); }
+    // Boot statistics (clawd_prefs.cpp): the sim keeps no state between runs,
+    // so every run is boot 1.
+    uint32_t getULong(const char* key, uint32_t def = 0) { (void)key; return def; }
+    size_t   putULong(const char* key, uint32_t value) { (void)key; (void)value; return 4; }
     bool    remove(const char* key);
 };

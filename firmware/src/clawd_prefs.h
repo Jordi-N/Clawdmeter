@@ -18,3 +18,9 @@ bool pace_marker_get(void);
 void chime_level_set(int pct);      // apply; saved only when it changes
 void battery_care_set(int mode);    // `bc` 0-2 (power_hal.h); saved only when it changes
 int  chime_level_get(void);
+
+// Boot statistics in NVS: boots so far (this one included) and how many of
+// them followed a panic, watchdog or brownout. Written once per boot.
+void boot_stats_init(const char* reset_reason);   // early in setup(), once
+unsigned long boot_count(void);
+unsigned long crash_count(void);

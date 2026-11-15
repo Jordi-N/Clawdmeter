@@ -22,6 +22,7 @@ use clawdmeter_core::probe;
 use clawdmeter_core::usage;
 use clawdmeter_core::wifi::{self, Battery, Connection, Power, Secret, Transport, WifiStatus};
 use clawdmeter_core::{unix_now, ConfigFile, Engine, EngineStatus, HostClock, Paths, Settings, WriteKind};
+use clawdmeter_flash::device::FirmwareInfo;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -42,6 +43,11 @@ const LINK_CHECK_EVERY: i64 = 5;
 /// How long the device has to acknowledge a provisioning line (s). The
 /// official firmware never does.
 const PROVISION_ACK_SECS: i64 = 10;
+/// How often the link summary goes in the log (s).
+const SUMMARY_EVERY: i64 = 30 * 60;
+/// A boot time later than the last one by more than this means the board
+/// restarted in between (s): covers the second rounding on both clocks.
+const REBOOT_SLACK: i64 = 30;
 
 /// Requests from the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +173,144 @@ enum Attempt {
     Usb(std::io::Result<(UsbLink, DeviceEvents)>),
 }
 
+/// The device link's history, for the log: how long each link lasted, the
+/// failed attempts before the next one, write-failure streaks, board
+/// restarts seen in its `info` replies, and a summary every
+/// [`SUMMARY_EVERY`] that shows flapping.
+#[derive(Debug, Default)]
+struct LinkLog {
+    /// The open link and since when.
+    up: Option<(Transport, i64)>,
+    /// When the last link went down (or the daemon started), while none is up.
+    down_at: Option<i64>,
+    /// Failed connect attempts since `down_at`.
+    attempts: u32,
+    /// The current write-failure streak: when it began and its length.
+    failing: Option<(i64, u32)>,
+    /// The board's estimated boot time (unix s) and reset reason, from its
+    /// last `info`.
+    boot: Option<(i64, String)>,
+    /// Start of the summary window; the counts below are within it.
+    window_start: i64,
+    up_secs: i64,
+    connects: u32,
+    drops: u32,
+    failed_attempts: u32,
+    write_failures: u32,
+}
+
+impl LinkLog {
+    fn new(now: i64) -> Self {
+        LinkLog { down_at: Some(now), window_start: now, ..Default::default() }
+    }
+
+    /// A link opened.
+    fn connected(&mut self, t: Transport, now: i64) {
+        match self.down_at.take() {
+            Some(at) => log::info!(
+                "link up: {} after {} s without a link ({} failed attempts)",
+                t.as_str(),
+                now - at,
+                self.attempts
+            ),
+            None => log::info!("link up: {}", t.as_str()),
+        }
+        self.attempts = 0;
+        self.connects += 1;
+        self.up = Some((t, now));
+    }
+
+    /// The open link went away (none open: nothing to log).
+    fn down(&mut self, now: i64, why: &str) {
+        let Some((t, since)) = self.up.take() else { return };
+        self.up_secs += now - since.max(self.window_start);
+        self.drops += 1;
+        self.down_at = Some(now);
+        let streak = match self.failing.take() {
+            Some((_, n)) => format!(", after {n} failed writes in a row"),
+            None => String::new(),
+        };
+        log::info!("link down: {} after {} s ({why}{streak})", t.as_str(), now - since);
+    }
+
+    fn attempt_failed(&mut self) {
+        self.attempts += 1;
+        self.failed_attempts += 1;
+    }
+
+    /// A write's outcome: the first failure of a streak and the recovery
+    /// are logged, not every failure.
+    fn wrote(&mut self, now: i64, r: &Result<(), String>) {
+        let via = self.up.map_or("none", |(t, _)| t.as_str());
+        match r {
+            Ok(()) => {
+                if let Some((since, n)) = self.failing.take() {
+                    log::info!("writes over {via} go through again after {n} failures in {} s", now - since);
+                }
+            }
+            Err(e) => {
+                self.write_failures += 1;
+                if let Some((_, n)) = &mut self.failing {
+                    *n += 1;
+                    log::debug!("write failed again ({n} in a row): {e}");
+                } else {
+                    log::warn!("write over {via} failed: {e}");
+                    self.failing = Some((now, 1));
+                }
+            }
+        }
+    }
+
+    /// The board's `info` reply: a boot time later than the last one seen
+    /// means it restarted (power, crash, watchdog...) in between.
+    fn device_info(&mut self, info: &FirmwareInfo, now: i64) {
+        let Some(up) = info.up else { return };
+        let boot = now - up as i64;
+        let rst = info.rst.clone().unwrap_or_else(|| "?".into());
+        if restarted(self.boot.as_ref().map(|b| b.0), boot) {
+            log::warn!("device restarted since the last info: up {up} s, reset reason {rst}");
+        }
+        self.boot = Some((boot, rst));
+    }
+
+    /// The summary line once [`SUMMARY_EVERY`] has passed; the counts then
+    /// start again.
+    fn summary(&mut self, now: i64) -> Option<String> {
+        let span = now - self.window_start;
+        if span < SUMMARY_EVERY {
+            return None;
+        }
+        let open = self.up.map_or(0, |(_, since)| now - since.max(self.window_start));
+        let pct = (self.up_secs + open) * 100 / span;
+        let device = match &self.boot {
+            Some((at, rst)) => format!("device up {} s, reset reason {rst}", now - at),
+            None => "no device info".to_owned(),
+        };
+        let line = format!(
+            "link summary over {span} s: up {pct} %, now {}, {} connects, {} drops, {} failed attempts, \
+             {} write failures; {device}",
+            self.up.map_or("none", |(t, _)| t.as_str()),
+            self.connects,
+            self.drops,
+            self.failed_attempts,
+            self.write_failures,
+        );
+        self.window_start = now;
+        self.up_secs = 0;
+        self.connects = 0;
+        self.drops = 0;
+        self.failed_attempts = 0;
+        self.write_failures = 0;
+        Some(line)
+    }
+}
+
+/// A board that reports booting at `boot` restarted since it last reported
+/// booting at `prev`.
+fn restarted(prev: Option<i64>, boot: i64) -> bool {
+    prev.is_some_and(|p| boot > p + REBOOT_SLACK)
+}
+
 /// Read each account of a poll plan: the probe, `/usage`, or a reading known
 /// without a call. The probe runs from `cwd` (the state dir).
 fn poll_all(claude: Option<PathBuf>, plan: PollPlan, home: PathBuf, cwd: PathBuf) -> PollResults {
@@ -269,8 +413,9 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut usb_retry = Reconnect::default();
     // The last write on the current link, for the USB keepalive.
     let mut link_written_at = 0;
-    // The window's USB claim as last seen, to log when it starts and ends.
-    let mut usb_was_claimed = false;
+    // Since when the window has claimed USB, as last seen, to log when the
+    // claim starts and ends.
+    let mut usb_claimed_since: Option<i64> = None;
     // Listing serial ports costs a SetupAPI walk on Windows: at most this often.
     let mut ports_scanned_at = 0;
     let mut battery: Option<Battery> = None;
@@ -293,6 +438,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
     let mut last_link_check = unix_now();
     let mut last_write_at = None;
     let mut chimes_muted = false;
+    let mut stats = LinkLog::new(unix_now());
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -308,6 +454,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     if let Some(l) = link.take() {
                         l.close().await;
                     }
+                    stats.down(now, if cmd == Command::Forget { "forget asked" } else { "reconnect asked" });
                     if cmd == Command::Forget {
                         if let Some(key) = cache.load() {
                             cache.invalidate(&key);
@@ -366,6 +513,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     if let Some(l) = link.take() {
                         l.close().await;
                     }
+                    stats.down(now, "daemon stopping");
                     log::info!("daemon stopped");
                     return;
                 }
@@ -460,11 +608,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         }
         if polling.as_ref().is_some_and(JoinHandle::is_finished) {
             if let Ok(results) = polling.take().expect("checked").await {
-                for (d, r) in &results {
-                    if let Err(e) = &r.result {
-                        log::warn!("{}: {e}", d.display());
-                    }
-                }
+                // Each miss is already logged by `probe::poll`, with its source and timing.
                 engine.on_poll_results(unix_now(), results);
                 let blocks = engine.blocks(unix_now());
                 if blocks != saved_blocks {
@@ -505,6 +649,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                         LinkError::NoAdapter(s) => LinkState::NoAdapter(s.clone()),
                         _ => LinkState::Searching,
                     };
+                    stats.attempt_failed();
                     let wait = reconnect.failed(now);
                     if !matches!(e, LinkError::NotFound) || wait == 1 {
                         log::info!("{e}; retrying in {wait}s");
@@ -518,9 +663,11 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     if let Some(old) = link.take() {
                         old.close().await;
                     }
+                    stats.down(now, "moving to WiFi");
                     Some((Link::Wifi(l), rx))
                 }
                 Ok(Attempt::Wifi(Err(e))) => {
+                    stats.attempt_failed();
                     let wait = wifi_retry.failed(now);
                     if wait == 1 {
                         log::info!("WiFi: {e}; using Bluetooth meanwhile");
@@ -542,9 +689,11 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     if let Some(old) = link.take() {
                         old.close().await;
                     }
+                    stats.down(now, "moving to USB");
                     Some((Link::Usb(l), rx))
                 }
                 Ok(Attempt::Usb(Err(e))) => {
+                    stats.attempt_failed();
                     let wait = usb_retry.failed(now);
                     if wait == 1 {
                         log::info!("USB: {e}");
@@ -575,6 +724,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     Link::Ble(_) | Link::Usb(_) => None,
                 };
                 link_written_at = now;
+                stats.connected(l.transport(), now);
                 link_state = LinkState::Connected { key, name, via: l.transport() };
                 link = Some(l);
                 device_events = Some(rx);
@@ -591,7 +741,7 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                 let _ = l.write(wifi::enable_line(false).as_bytes()).await;
             }
             l.close().await;
-            log::info!("WiFi no longer chosen; switching to Bluetooth");
+            stats.down(now, "WiFi no longer chosen");
             device_events = None;
             link_state = LinkState::Searching;
             reconnect.retry_in(now, 0);
@@ -599,18 +749,21 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         // The window needs the serial port (flashing, the Device page's
         // probe): let go of it until the claim runs out.
         let usb_claimed = crate::ipc::usb_claimed(&paths, now);
-        if usb_claimed != usb_was_claimed {
-            usb_was_claimed = usb_claimed;
-            if usb_claimed {
+        match (usb_claimed, usb_claimed_since) {
+            (true, None) => {
                 log::info!("USB port claimed by the window (Device/Flash page)");
-            } else {
-                log::info!("USB port free again; trying USB");
+                usb_claimed_since = Some(now);
+            }
+            (false, Some(since)) => {
+                log::info!("USB port free again after {} s; trying USB", now - since);
+                usb_claimed_since = None;
                 usb_retry.retry_in(now, 0);
             }
+            _ => {}
         }
         if usb_claimed && link.as_ref().is_some_and(|l| l.transport() == Transport::Usb) {
             link.take().expect("checked").close().await;
-            log::info!("closing the USB link for the window");
+            stats.down(now, "closed for the window's USB claim");
             device_events = None;
             link_state = LinkState::Searching;
             reconnect.retry_in(now, 0);
@@ -677,8 +830,11 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         if let Some(l) = &link {
             if now - last_link_check >= LINK_CHECK_EVERY {
                 last_link_check = now;
+                if let Some(info) = l.take_info() {
+                    stats.device_info(&info, now);
+                }
                 if let Some(why) = l.down_reason().await {
-                    log::info!("device disconnected ({why}), reconnecting...");
+                    stats.down(now, &why);
                     link = None;
                     device_events = None;
                     link_state = LinkState::Searching;
@@ -715,16 +871,17 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
                     WriteKind::Agents => "Agents",
                 };
                 log::info!("{label}: {}", String::from_utf8_lossy(&bytes));
-                match l.write(&bytes).await {
+                let r = l.write(&bytes).await;
+                stats.wrote(now, &r);
+                match r {
                     Ok(()) => {
                         engine.mark_written(now, &w);
                         last_write_at = Some(now);
                         link_written_at = now;
                     }
-                    Err(e) => {
-                        log::warn!("write failed: {e}");
+                    Err(_) => {
                         if let Some(why) = l.down_reason().await {
-                            log::info!("device disconnected ({why}), reconnecting...");
+                            stats.down(now, &why);
                             link = None;
                             device_events = None;
                             link_state = LinkState::Searching;
@@ -742,9 +899,10 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
         // when there's nothing else to send.
         if let Some(l) = link.as_ref().filter(|l| l.transport() != Transport::Ble) {
             if now - link_written_at >= wifi::USB_HEARTBEAT_SECS {
-                match l.write(wifi::HEARTBEAT_LINE.as_bytes()).await {
-                    Ok(()) => link_written_at = now,
-                    Err(e) => log::warn!("keepalive failed: {e}"),
+                let r = l.write(wifi::HEARTBEAT_LINE.as_bytes()).await;
+                stats.wrote(now, &r);
+                if r.is_ok() {
+                    link_written_at = now;
                 }
             }
         }
@@ -796,6 +954,9 @@ pub async fn run(paths: Paths, mut commands: mpsc::UnboundedReceiver<Command>, s
             last_transport = transport;
         }
 
+        if let Some(line) = stats.summary(now) {
+            log::info!("{line}");
+        }
         wifi.fallback = wifi_ready && link.as_ref().is_some_and(|l| l.transport() == Transport::Ble);
         if link.as_ref().is_none_or(|l| l.transport() != Transport::Wifi) {
             wifi.addr = None;
@@ -874,5 +1035,45 @@ pub fn once(paths: &Paths) -> i32 {
         0
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_summary_counts_uptime_within_its_window() {
+        let mut s = LinkLog::new(0);
+        s.connected(Transport::Usb, 100);
+        s.down(400, "unplugged");
+        s.attempt_failed();
+        s.connected(Transport::Ble, 1000);
+        s.wrote(1001, &Err("timed out".into()));
+        s.wrote(1002, &Ok(()));
+        assert_eq!(s.summary(SUMMARY_EVERY - 1), None, "not due yet");
+        // 300 s on USB, 800 s on Bluetooth so far, of 1800.
+        assert_eq!(
+            s.summary(SUMMARY_EVERY).as_deref(),
+            Some(
+                "link summary over 1800 s: up 61 %, now ble, 2 connects, 1 drops, 1 failed attempts, \
+                 1 write failures; no device info"
+            )
+        );
+        // The Bluetooth link counts from the new window's start only.
+        let next = s.summary(2 * SUMMARY_EVERY).expect("due");
+        assert!(next.starts_with("link summary over 1800 s: up 100 %, now ble, 0 connects"), "{next}");
+    }
+
+    #[test]
+    fn a_later_boot_time_is_a_restart() {
+        assert!(!restarted(None, 1000), "the first info is no restart");
+        assert!(!restarted(Some(1000), 1000 + REBOOT_SLACK), "clock rounding");
+        assert!(restarted(Some(1000), 5000));
+        assert!(!restarted(Some(5000), 1000), "an earlier boot estimate is drift, not a restart");
+        let mut s = LinkLog::new(0);
+        let info = FirmwareInfo { up: Some(600), rst: Some("panic".into()), ..Default::default() };
+        s.device_info(&info, 1000);
+        assert_eq!(s.boot, Some((400, String::from("panic"))));
     }
 }

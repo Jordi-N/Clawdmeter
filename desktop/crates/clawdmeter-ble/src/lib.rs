@@ -30,6 +30,11 @@
 //! Adapters come from one [`Bluetooth`] handle per runtime, never a fresh
 //! btleplug manager per attempt (on Linux each leaks a D-Bus connection).
 //!
+//! Logging: lines start with `ble: ` so `daemon.log` can be searched. Repeats
+//! of an identical failure line are held back for 10 minutes and the next one
+//! carries the count; a run of links that die within seconds of connecting
+//! logs `ble: stale bond suspected`.
+//!
 //! Reconnect timing is [`Reconnect`] (backoff capped at
 //! [`reconnect::BACKOFF_CAP`]), cut short by [`spawn_watcher`]'s wakeups when
 //! the OS sees the device come back (BlueZ auto-reconnecting the bonded
@@ -47,9 +52,9 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use btleplug::api::{
     BDAddr, Central, CentralState, Characteristic, Manager as _, Peripheral as _, RetrievePeripheralsOptions,
@@ -57,6 +62,7 @@ use btleplug::api::{
 };
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::{Stream, StreamExt};
+use log::Level;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -223,17 +229,40 @@ impl Default for LinkOptions {
 pub struct Bluetooth {
     manager: Arc<tokio::sync::Mutex<Option<Arc<Manager>>>>,
     lost_connections: Arc<tokio::sync::watch::Sender<u64>>,
+    /// The last [`adapter`](Self::adapter) outcome (`None` before the first),
+    /// so only changes are logged.
+    adapter_seen: Arc<Mutex<Option<Result<(), String>>>>,
 }
 
 impl Default for Bluetooth {
     fn default() -> Self {
-        Bluetooth { manager: Arc::default(), lost_connections: Arc::new(tokio::sync::watch::channel(0).0) }
+        Bluetooth {
+            manager: Arc::default(),
+            lost_connections: Arc::new(tokio::sync::watch::channel(0).0),
+            adapter_seen: Arc::default(),
+        }
     }
 }
 
 impl Bluetooth {
-    /// The first powered adapter.
+    /// The first powered adapter. Logs when it goes missing or off, and when
+    /// it comes back.
     pub async fn adapter(&self) -> Result<Adapter, LinkError> {
+        let r = self.find_adapter().await;
+        let now = r.as_ref().map(|_| ()).map_err(LinkError::to_string);
+        let mut seen = self.adapter_seen.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.as_ref() != Some(&now) {
+            match (&*seen, &now) {
+                (_, Err(why)) => log::warn!("ble: adapter unavailable: {why}"),
+                (Some(Err(_)), Ok(())) => log::info!("ble: adapter available again"),
+                (_, Ok(())) => log::info!("ble: adapter ready"),
+            }
+            *seen = Some(now);
+        }
+        r
+    }
+
+    async fn find_adapter(&self) -> Result<Adapter, LinkError> {
         let manager = self.manager().await?;
         let adapters = match manager.adapters().await {
             Ok(a) => a,
@@ -252,6 +281,7 @@ impl Bluetooth {
                         // not be dropped.
                         if self.manager.lock().await.take_if(|m| Arc::ptr_eq(m, &manager)).is_some() {
                             self.lost_connections.send_modify(|n| *n += 1);
+                            log::warn!("ble: D-Bus connection to bluetoothd lost ({e}); replacing the manager");
                         }
                         return Err(LinkError::NoAdapter(e.to_string()));
                     }
@@ -321,6 +351,8 @@ pub struct Candidate {
     pub name: Option<String>,
     /// Exposes the custom data service (unambiguous).
     pub has_service: bool,
+    /// How it was found, for the log: `os-known`, `bonded-address` or `scan`.
+    pub found_by: &'static str,
 }
 
 pub(crate) async fn describe(p: Peripheral) -> Candidate {
@@ -328,7 +360,7 @@ pub(crate) async fn describe(p: Peripheral) -> Candidate {
     let name = props.as_ref().and_then(|pr| pr.local_name.clone());
     let has_service = props.as_ref().is_some_and(|pr| pr.services.contains(&SERVICE_UUID))
         || p.services().iter().any(|s| s.uuid == SERVICE_UUID);
-    Candidate { key: peripheral_key(&p), peripheral: p, name, has_service }
+    Candidate { key: peripheral_key(&p), peripheral: p, name, has_service, found_by: "os-known" }
 }
 
 /// True when a candidate is ours: the custom service alone is enough; the
@@ -352,17 +384,22 @@ pub fn connect_order<'a>(cands: &'a [Candidate], cached: Option<&str>) -> Vec<&'
 
 /// List Clawdmeters the OS already knows, without scanning.
 pub async fn known_devices(adapter: &Adapter) -> Vec<Candidate> {
-    let mut list: Vec<Peripheral> = adapter
-        .retrieve_peripherals(RetrievePeripheralsOptions {
-            identifiers: None,
-            services: Some(vec![SERVICE_UUID, HID_SERVICE_UUID]),
-        })
-        .await
-        .unwrap_or_default();
+    let opts = RetrievePeripheralsOptions { identifiers: None, services: Some(vec![SERVICE_UUID, HID_SERVICE_UUID]) };
+    let mut list: Vec<Peripheral> = match adapter.retrieve_peripherals(opts).await {
+        Ok(l) => l,
+        Err(e) => {
+            log_repeated(Level::Warn, &format!("ble: listing OS-connected devices failed: {e}"));
+            Vec::new()
+        }
+    };
     if cfg!(target_os = "linux") {
         // BlueZ also lists paired-but-disconnected devices; connecting to
         // them reconnects without a scan.
-        for p in adapter.peripherals().await.unwrap_or_default() {
+        let known = adapter.peripherals().await.unwrap_or_else(|e| {
+            log_repeated(Level::Warn, &format!("ble: listing BlueZ devices failed: {e}"));
+            Vec::new()
+        });
+        for p in known {
             if !list.iter().any(|q| q.id() == p.id()) {
                 list.push(p);
             }
@@ -380,6 +417,7 @@ pub async fn known_devices(adapter: &Adapter) -> Vec<Candidate> {
             let id = c.peripheral.id().to_string();
             let paired = tokio::task::spawn_blocking(move || bluez::is_paired(&id)).await.unwrap_or(Ok(false));
             if !paired.unwrap_or(false) {
+                log_repeated(Level::Info, &format!("ble: ignoring {}: seen by BlueZ but not paired", c.key));
                 continue;
             }
         }
@@ -390,7 +428,8 @@ pub async fn known_devices(adapter: &Adapter) -> Vec<Candidate> {
 
 /// Scan for advertisements of the data service (first-time setup).
 pub async fn scan(adapter: &Adapter, time: Duration) -> Vec<Candidate> {
-    if adapter.start_scan(ScanFilter { services: vec![SERVICE_UUID] }).await.is_err() {
+    if let Err(e) = adapter.start_scan(ScanFilter { services: vec![SERVICE_UUID] }).await {
+        log_repeated(Level::Warn, &format!("ble: scan failed to start: {e}"));
         return Vec::new();
     }
     tokio::time::sleep(time).await;
@@ -399,7 +438,7 @@ pub async fn scan(adapter: &Adapter, time: Duration) -> Vec<Candidate> {
     for p in adapter.peripherals().await.unwrap_or_default() {
         let c = describe(p).await;
         if accept(c.name.as_deref(), c.has_service) {
-            out.push(c);
+            out.push(Candidate { found_by: "scan", ..c });
         }
     }
     out
@@ -430,6 +469,99 @@ impl WriteHealth {
     pub fn is_zombie(&self) -> bool {
         self.failures.load(Ordering::Relaxed) >= ZOMBIE_WRITE_FAILURES
     }
+}
+
+/// How long identical log lines are held back after one is logged.
+const REPEAT_WINDOW: Duration = Duration::from_secs(600);
+
+/// Rate limit for identical log lines: the first is logged, repeats within
+/// [`REPEAT_WINDOW`] are counted, and the first one after it carries the
+/// count.
+struct Repeats {
+    /// (line, when it was last logged, repeats held back since).
+    seen: Vec<(String, Instant, u32)>,
+}
+
+impl Repeats {
+    /// `Some((held, since))` when `line` is to be logged now: `held`
+    /// identical lines were held back since it was last logged, `since` ago.
+    /// `None` holds it back.
+    fn admit(&mut self, line: &str, now: Instant) -> Option<(u32, Duration)> {
+        if let Some(e) = self.seen.iter_mut().find(|e| e.0 == line) {
+            let since = now.duration_since(e.1);
+            if since < REPEAT_WINDOW {
+                e.2 += 1;
+                return None;
+            }
+            e.1 = now;
+            return Some((std::mem::take(&mut e.2), since));
+        }
+        // ponytail: forgets every count past 64 distinct lines; evict the
+        // oldest instead if varied error texts ever churn through it.
+        if self.seen.len() >= 64 {
+            self.seen.clear();
+        }
+        self.seen.push((line.to_owned(), now, 0));
+        Some((0, Duration::ZERO))
+    }
+}
+
+static REPEATS: Mutex<Repeats> = Mutex::new(Repeats { seen: Vec::new() });
+
+/// Log `line` at `level`, holding back identical repeats (see [`Repeats`]).
+pub(crate) fn log_repeated(level: Level, line: &str) {
+    let admitted = REPEATS.lock().unwrap_or_else(|e| e.into_inner()).admit(line, Instant::now());
+    match admitted {
+        Some((0, _)) => log::log!(level, "{line}"),
+        Some((held, since)) => log::log!(level, "{line} ({held} more in the last {} min)", since.as_secs() / 60),
+        None => {}
+    }
+}
+
+/// A link that dies this soon after the OS connected it is short-lived.
+const SHORT_LINK: Duration = Duration::from_secs(30);
+/// Short-lived links within [`STALE_BOND_WINDOW`] that point at a stale bond.
+const STALE_BOND_LINKS: usize = 3;
+/// The window [`STALE_BOND_LINKS`] are counted in, and the least time
+/// between two stale-bond warnings.
+const STALE_BOND_WINDOW: Duration = Duration::from_secs(300);
+
+/// Recent short-lived links: connect, then a drop or failed discovery within
+/// [`SHORT_LINK`]. Repeated, that is the stale-bond pattern: the computer
+/// keeps a pairing key the device lost, so encryption fails and the link
+/// drops right after it comes up (seen on Windows).
+struct ShortLinks {
+    at: Vec<Instant>,
+    warned: Option<Instant>,
+}
+
+impl ShortLinks {
+    /// Record one. `Some(n)`: `n` within the window, time to warn (at most
+    /// once per window).
+    fn record(&mut self, now: Instant) -> Option<usize> {
+        self.at.retain(|t| now.duration_since(*t) < STALE_BOND_WINDOW);
+        self.at.push(now);
+        let quiet = self.warned.is_none_or(|w| now.duration_since(w) >= STALE_BOND_WINDOW);
+        if self.at.len() < STALE_BOND_LINKS || !quiet {
+            return None;
+        }
+        self.warned = Some(now);
+        Some(self.at.len())
+    }
+}
+
+static SHORT_LINKS: Mutex<ShortLinks> = Mutex::new(ShortLinks { at: Vec::new(), warned: None });
+
+/// A link to `key` died within [`SHORT_LINK`] of connecting.
+fn note_short_link(key: &str) {
+    let Some(n) = SHORT_LINKS.lock().unwrap_or_else(|e| e.into_inner()).record(Instant::now()) else { return };
+    log::warn!(
+        "ble: stale bond suspected: {n} links died within {}s of connecting in the last {} min (last: {key}). This \
+         computer likely keeps a pairing key the device lost (reflash or bond clear on the device): remove \
+         '{DEVICE_NAME}' in the OS Bluetooth settings and pair it again",
+        SHORT_LINK.as_secs(),
+        STALE_BOND_WINDOW.as_secs() / 60
+    );
 }
 
 /// A canonical MAC from a Windows Bluetooth PnP instance id:
@@ -540,6 +672,10 @@ pub struct DeviceLink {
     key: String,
     name: Option<String>,
     health: WriteHealth,
+    /// When the OS link came up (or was found up), for the drop log.
+    up_at: Instant,
+    /// The drop (or close) was logged already.
+    down_logged: AtomicBool,
 }
 
 impl std::fmt::Debug for DeviceLink {
@@ -566,17 +702,30 @@ impl DeviceLink {
         if cands.is_empty() && opts.allow_scan {
             cands = scan(adapter, opts.scan_time).await;
         }
+        let order = connect_order(&cands, cached.as_deref());
+        if order.is_empty() {
+            log_repeated(Level::Info, &format!("ble: no {DEVICE_NAME} known to the OS (scan: {})", opts.allow_scan));
+        } else {
+            let list: Vec<String> = order
+                .iter()
+                .map(|c| {
+                    let how = if c.has_service { "data service" } else { "name match" };
+                    format!("{} ({}, {how})", c.key, c.found_by)
+                })
+                .collect();
+            let hint = cached.as_deref().unwrap_or("none");
+            log_repeated(Level::Info, &format!("ble: trying {} (cached or pinned: {hint})", list.join(", ")));
+        }
         let mut last_err = LinkError::NotFound;
-        for cand in connect_order(&cands, cached.as_deref()) {
+        for cand in order {
             match Self::connect(cand.clone(), opts).await {
                 Ok(ok) => {
-                    if cached.as_deref() != Some(cand.key.as_str()) {
+                    if !cached.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&cand.key)) {
                         let _ = cache.save(&cand.key);
                     }
                     return Ok(ok);
                 }
                 Err(e) => {
-                    log::warn!("connect to {} failed: {e}", cand.key);
                     if cfg!(target_os = "macos") && is_encryption_error(&e.to_string()) {
                         log::warn!("encryption failed: likely a stale macOS bond; trying to unpair it");
                         let _ = tokio::task::spawn_blocking(macos_unpair_stale_bond).await;
@@ -589,10 +738,28 @@ impl DeviceLink {
         Err(last_err)
     }
 
-    /// Connect to a specific candidate.
+    /// Connect to a specific candidate. Logs how long each step took, or
+    /// the step that failed.
     pub async fn connect(cand: Candidate, opts: &LinkOptions) -> Result<(DeviceLink, DeviceEvents), LinkError> {
+        let (key, found_by) = (cand.key.clone(), cand.found_by);
+        let started = Instant::now();
+        let r = Self::establish(cand, opts, started).await;
+        if let Err((step, e)) = &r {
+            let secs = started.elapsed().as_secs();
+            let line = format!("ble: connect to {key} ({found_by}) failed at {step} after {secs}s: {e}");
+            log_repeated(Level::Warn, &line);
+        }
+        r.map_err(|(_, e)| e)
+    }
+
+    async fn establish(
+        cand: Candidate,
+        opts: &LinkOptions,
+        started: Instant,
+    ) -> Result<(DeviceLink, DeviceEvents), (&'static str, LinkError)> {
         let p = cand.peripheral;
-        if !p.is_connected().await.unwrap_or(false) {
+        let reused = p.is_connected().await.unwrap_or(false);
+        if !reused {
             let r = match tokio::time::timeout(opts.connect_timeout, p.connect()).await {
                 Ok(r) => r.map_err(LinkError::Ble),
                 Err(_) => Err(LinkError::Timeout("connect")),
@@ -601,18 +768,29 @@ impl DeviceLink {
                 // Cancel BlueZ's pending Connect, or the next attempt fails
                 // with "Operation already in progress".
                 let _ = p.disconnect().await;
-                return Err(e);
+                return Err(("connect", e));
             }
         }
-        tokio::time::timeout(opts.discover_timeout, p.discover_services())
-            .await
-            .map_err(|_| LinkError::Timeout("service discovery"))??;
+        let up_at = Instant::now();
+        let discovered = match tokio::time::timeout(opts.discover_timeout, p.discover_services()).await {
+            Ok(r) => r.map_err(LinkError::Ble),
+            Err(_) => Err(LinkError::Timeout("service discovery")),
+        };
+        if let Err(e) = discovered {
+            // The link came up but GATT didn't answer: one sign of a stale
+            // bond (encryption fails, the device drops the link).
+            note_short_link(&cand.key);
+            return Err(("service discovery", e));
+        }
         let chars = p.characteristics();
-        let rx = chars
-            .iter()
-            .find(|c| c.uuid == RX_UUID && c.service_uuid == SERVICE_UUID)
-            .cloned()
-            .ok_or(LinkError::MissingCharacteristic)?;
+        let Some(rx) = chars.iter().find(|c| c.uuid == RX_UUID && c.service_uuid == SERVICE_UUID).cloned() else {
+            // Old firmware, another device under our name, or a stale GATT
+            // cache (Windows keeps one per bond).
+            let mut services: Vec<String> = p.services().iter().map(|s| s.uuid.to_string()).collect();
+            services.sort();
+            log::warn!("ble: {} has no RX characteristic; services: {}", cand.key, services.join(", "));
+            return Err(("characteristic lookup", LinkError::MissingCharacteristic));
+        };
         let (tx, events) = mpsc::unbounded_channel();
         let notifying: Vec<_> = chars
             .iter()
@@ -623,16 +801,17 @@ impl DeviceLink {
             // Listen before subscribing: the device fires its REQ notify
             // inside the subscribe (it asks only when it has no data yet).
             match p.notifications().await {
-                Ok(stream) => spawn_event_forwarder(stream, tx),
-                Err(e) => log::warn!("no notification stream: {e}"),
+                Ok(stream) => spawn_event_forwarder(stream, tx, cand.key.clone()),
+                Err(e) => log::warn!("ble: no notification stream from {}: {e}", cand.key),
             }
         }
+        let mut subscribed = Vec::new();
         for c in &notifying {
-            let what = if c.uuid == REQ_UUID { "refresh" } else { "dismiss" };
+            let what = if c.uuid == REQ_UUID { "REQ" } else { "TX" };
             match tokio::time::timeout(opts.subscribe_timeout, p.subscribe(c)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => log::warn!("{what} subscription unavailable: {e}"),
-                Err(_) => log::warn!("{what} subscription timed out; carrying on without it"),
+                Ok(Ok(())) => subscribed.push(what),
+                Ok(Err(e)) => log_repeated(Level::Warn, &format!("ble: {what} subscription unavailable: {e}")),
+                Err(_) => log_repeated(Level::Warn, &format!("ble: {what} subscription timed out; carrying on")),
             }
         }
         #[cfg(target_os = "linux")]
@@ -644,7 +823,26 @@ impl DeviceLink {
                 log::debug!("could not mark the device trusted: {e}");
             }
         }
-        Ok((DeviceLink { key: cand.key, name: cand.name, peripheral: p, rx, health: WriteHealth::default() }, events))
+        let connect_ms = (up_at - started).as_millis();
+        let how = if reused { "OS link reused".to_owned() } else { format!("connect {connect_ms} ms") };
+        let subs = if subscribed.is_empty() { "none".to_owned() } else { subscribed.join("+") };
+        log::info!(
+            "ble: link to {} ({}) ready in {} ms ({how}, discovery {} ms, subscribed: {subs})",
+            cand.key,
+            cand.found_by,
+            started.elapsed().as_millis(),
+            up_at.elapsed().as_millis()
+        );
+        let link = DeviceLink {
+            key: cand.key,
+            name: cand.name,
+            peripheral: p,
+            rx,
+            health: WriteHealth::default(),
+            up_at,
+            down_logged: AtomicBool::new(false),
+        };
+        Ok((link, events))
     }
 
     /// Write one payload (already encoded to at most [`MAX_WRITE`] bytes).
@@ -658,22 +856,49 @@ impl DeviceLink {
             Ok(r) => r.map_err(LinkError::Ble),
             Err(_) => Err(LinkError::Timeout("write")),
         };
+        let was_zombie = self.health.is_zombie();
         self.health.record(r.is_ok());
-        if self.health.is_zombie() {
-            log::warn!("{ZOMBIE_WRITE_FAILURES} writes in a row failed on a live-looking link; dropping it");
+        if let (Err(e), false, true) = (&r, was_zombie, self.health.is_zombie()) {
+            log::warn!(
+                "ble: zombie link to {}: {ZOMBIE_WRITE_FAILURES} writes in a row failed on a live-looking link \
+                 (last: {e}); dropping it",
+                self.key
+            );
         }
         r
     }
 
     /// Still connected? False once writes keep failing (a zombie link), so
-    /// the caller drops it and reconnects.
+    /// the caller drops it and reconnects. The first false logs why and how
+    /// long the link lasted.
     pub async fn is_connected(&self) -> bool {
-        !self.health.is_zombie() && self.peripheral.is_connected().await.unwrap_or(false)
+        let why = if self.health.is_zombie() {
+            "writes kept failing (zombie link)".to_owned()
+        } else {
+            match self.peripheral.is_connected().await {
+                Ok(true) => return true,
+                Ok(false) => "the OS reports it disconnected".to_owned(),
+                Err(e) => format!("connection state unreadable: {e}"),
+            }
+        };
+        if !self.down_logged.swap(true, Ordering::Relaxed) {
+            let lived = self.up_at.elapsed();
+            log::info!("ble: link to {} down after {}s: {why}", self.key, lived.as_secs());
+            if lived < SHORT_LINK {
+                note_short_link(&self.key);
+            }
+        }
+        false
     }
 
     /// Drop the GATT connection (the OS may keep the HID link).
     pub async fn close(&self) {
-        let _ = self.peripheral.disconnect().await;
+        if !self.down_logged.swap(true, Ordering::Relaxed) {
+            log::info!("ble: closing link to {} after {}s", self.key, self.up_at.elapsed().as_secs());
+        }
+        if let Err(e) = self.peripheral.disconnect().await {
+            log::debug!("ble: disconnect from {}: {e}", self.key);
+        }
     }
 
     /// Cache key (address).
@@ -709,8 +934,12 @@ async fn bonded_by_address(adapter: &Adapter, cached: Option<&str>) -> Vec<Candi
     // `cached` already prefers CLAWDMETER_BLE_ADDRESS over the cache file.
     let mut addrs: Vec<String> = cached.map(str::to_owned).into_iter().collect();
     if addrs.iter().all(|a| parse_mac(a).is_none()) {
-        if let Ok(Some(mac)) = tokio::task::spawn_blocking(windows_pnp_address).await {
-            addrs.push(mac);
+        match tokio::task::spawn_blocking(windows_pnp_address).await {
+            Ok(Some(mac)) => {
+                log_repeated(Level::Info, &format!("ble: Windows PnP table lists a bonded {DEVICE_NAME} at {mac}"));
+                addrs.push(mac);
+            }
+            _ => log_repeated(Level::Info, &format!("ble: no bonded {DEVICE_NAME} in the Windows PnP table")),
         }
     }
     let mut out: Vec<Candidate> = Vec::new();
@@ -718,14 +947,15 @@ async fn bonded_by_address(adapter: &Adapter, cached: Option<&str>) -> Vec<Candi
         if out.iter().any(|c| c.key.eq_ignore_ascii_case(&addr.to_string())) {
             continue;
         }
-        if let Ok(p) = adapter.add_peripheral(&PeripheralId::from(addr)).await {
-            log::info!("trying bonded address {addr}");
-            out.push(Candidate {
+        match adapter.add_peripheral(&PeripheralId::from(addr)).await {
+            Ok(p) => out.push(Candidate {
                 key: addr.to_string(),
                 peripheral: p,
                 name: Some(DEVICE_NAME.into()),
                 has_service: false,
-            });
+                found_by: "bonded-address",
+            }),
+            Err(e) => log_repeated(Level::Warn, &format!("ble: bonded address {addr} unreachable: {e}")),
         }
     }
     out
@@ -735,8 +965,6 @@ async fn bonded_by_address(adapter: &Adapter, cached: Option<&str>) -> Vec<Candi
 /// PowerShell (about a second of CPU), and the table rarely changes.
 #[cfg(windows)]
 fn windows_pnp_address() -> Option<String> {
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
     static LAST: Mutex<Option<(Instant, Option<String>)>> = Mutex::new(None);
     let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, mac)) = last.as_ref() {
@@ -763,6 +991,7 @@ fn windows_pnp_lookup() -> Option<String> {
         .stdin(std::process::Stdio::null())
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .output()
+        .inspect_err(|e| log::warn!("ble: Windows PnP lookup could not run PowerShell: {e}"))
         .ok()?;
     String::from_utf8_lossy(&out.stdout).lines().find_map(mac_from_pnp_instance_id)
 }
@@ -822,15 +1051,18 @@ fn macos_unpair_stale_bond() {
 fn spawn_event_forwarder(
     mut stream: Pin<Box<dyn Stream<Item = btleplug::api::ValueNotification> + Send>>,
     tx: mpsc::UnboundedSender<DeviceEvent>,
+    key: String,
 ) {
     tokio::spawn(async move {
         while let Some(n) = stream.next().await {
             if let Some(ev) = device_event(n.uuid, &n.value) {
                 if tx.send(ev).is_err() {
-                    break;
+                    return;
                 }
             }
         }
+        // The stack closed it: a timestamp for the drop.
+        log::info!("ble: notification stream from {key} ended");
     });
 }
 
@@ -1029,6 +1261,37 @@ mod tests {
         assert!(!h.is_zombie(), "a success resets the count");
         h.record(false);
         assert!(h.is_zombie());
+    }
+
+    #[test]
+    fn repeated_lines_are_held_back() {
+        let mut r = Repeats { seen: Vec::new() };
+        let t = Instant::now();
+        let min = |m: u64| t + Duration::from_secs(m * 60);
+        assert_eq!(r.admit("a", t), Some((0, Duration::ZERO)), "the first is logged");
+        assert_eq!(r.admit("a", min(1)), None);
+        assert_eq!(r.admit("a", min(9)), None);
+        assert_eq!(r.admit("b", min(9)), Some((0, Duration::ZERO)), "another line is logged");
+        assert_eq!(r.admit("a", min(10)), Some((2, Duration::from_secs(600))), "then the count");
+        assert_eq!(r.admit("a", min(11)), None, "and the window starts over");
+        assert_eq!(r.admit("a", min(25)), Some((1, Duration::from_secs(900))));
+    }
+
+    #[test]
+    fn stale_bond_pattern() {
+        let mut s = ShortLinks { at: Vec::new(), warned: None };
+        let t = Instant::now();
+        let sec = |n: u64| t + Duration::from_secs(n);
+        assert_eq!(s.record(sec(0)), None);
+        assert_eq!(s.record(sec(20)), None);
+        assert_eq!(s.record(sec(40)), Some(3), "three short links in 5 min");
+        assert_eq!(s.record(sec(60)), None, "one warning per window");
+        // Spread out, they don't add up.
+        let mut s = ShortLinks { at: Vec::new(), warned: None };
+        assert_eq!(s.record(sec(0)), None);
+        assert_eq!(s.record(sec(200)), None);
+        assert_eq!(s.record(sec(400)), None);
+        assert_eq!(s.record(sec(450)), Some(3));
     }
 
     // The macOS daemon's stale-bond self-heal (unpair_macos).

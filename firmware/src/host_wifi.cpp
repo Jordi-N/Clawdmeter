@@ -9,6 +9,7 @@ bool host_wifi_has_creds(void) { return false; }
 void host_wifi_send(const char*) {}
 WifiSt host_wifi_state(void) { return WIFI_ST_OFF; }
 size_t host_wifi_status(char*, size_t) { return 0; }
+size_t host_wifi_diag(char*, size_t) { return 0; }
 bool host_wifi_take_changed(void) { return false; }
 #else
 #include "host_tcp.h"
@@ -27,9 +28,13 @@ static bool changed = true;     // first tick reports the boot state
 static unsigned attempt = 0;
 static uint32_t since_ms = 0;   // attempt start, or when to retry after a fail
 static char ip[16];
+// Diagnostics since boot (host_wifi_diag).
+static uint32_t n_tries = 0, n_fail = 0, n_lost = 0;
+static uint32_t ok_since_ms = 0;   // when the link last came up
 
 static void set_st(WifiSt s) {
-    if (s != st) changed = true;
+    if (s == st) return;   // e.g. the ack's CONNECTING, then the tick's
+    changed = true;
     st = s;
     Serial.printf("WiFi: %s\n", wifi_st_name(s));
 }
@@ -102,14 +107,19 @@ static void go_down(void) {
 }
 
 static void begin_attempt(void) {
+    n_tries++;
+    Serial.printf("WiFi: joining \"%s\" (attempt %u)\n", ssid, attempt + 1);
     radio_begin(ssid, pass);
     since_ms = millis();
     set_st(WIFI_ST_CONNECTING);
 }
 
-static void fail(void) {
+static void fail(const char* why) {
     go_down();
-    since_ms = millis() + wifi_backoff_ms(attempt++);
+    n_fail++;
+    const uint32_t wait = wifi_backoff_ms(attempt++);
+    since_ms = millis() + wait;
+    Serial.printf("WiFi: %s, retry in %lus\n", why, (unsigned long)(wait / 1000));
     set_st(WIFI_ST_FAIL);
 }
 
@@ -140,9 +150,13 @@ void host_wifi_tick(void (*on_line)(const char* line)) {
             radio_ip(ip, sizeof(ip));
             radio_mdns_start(ble_get_device_name(), ble_get_mac_address(), WIFI_TCP_PORT);
             tcp_host_start(WIFI_TCP_PORT);
+            ok_since_ms = millis();
+            Serial.printf("WiFi: up, ip %s, after %lums\n", ip, (unsigned long)(ok_since_ms - since_ms));
             set_st(WIFI_ST_OK);
-        } else if (r < 0 || millis() - since_ms >= CONNECT_TIMEOUT_MS) {
-            fail();
+        } else if (r < 0) {
+            fail("join refused (wrong password, network not found or lost)");
+        } else if (millis() - since_ms >= CONNECT_TIMEOUT_MS) {
+            fail("no connection within 20 s");
         }
         break;
     }
@@ -151,8 +165,10 @@ void host_wifi_tick(void (*on_line)(const char* line)) {
         break;
     case WIFI_ST_OK:
         if (radio_poll() <= 0) {
-            Serial.println("WiFi: link lost");
-            fail();
+            n_lost++;
+            Serial.printf("WiFi: link lost after %lus (#%lu)\n",
+                (unsigned long)((millis() - ok_since_ms) / 1000), (unsigned long)n_lost);
+            fail("link lost");
             break;
         }
         tcp_host_tick(key, on_line);
@@ -171,6 +187,20 @@ WifiSt host_wifi_state(void) { return st; }
 
 size_t host_wifi_status(char* buf, size_t cap) {
     return wifi_status_json(buf, cap, st, ip, ssid);
+}
+
+size_t host_wifi_diag(char* buf, size_t cap) {
+    const TcpStats* t = tcp_host_stats();
+    const long up = st == WIFI_ST_OK ? (long)((millis() - ok_since_ms) / 1000) : -1;
+    const long rx_age = t->last_line_ms ? (long)((millis() - t->last_line_ms) / 1000) : -1;
+    const int n = snprintf(buf, cap,
+        "{\"try\":%lu,\"fail\":%lu,\"lost\":%lu,\"up\":%ld,\"tcp\":%lu,\"auth\":%lu,"
+        "\"authf\":%lu,\"autht\":%lu,\"closed\":%lu,\"idle\":%lu,\"wrf\":%lu,\"rxage\":%ld}",
+        (unsigned long)n_tries, (unsigned long)n_fail, (unsigned long)n_lost, up,
+        (unsigned long)t->accepts, (unsigned long)t->authed, (unsigned long)t->auth_fail,
+        (unsigned long)t->auth_timeout, (unsigned long)t->closed, (unsigned long)t->idle,
+        (unsigned long)t->write_fail, rx_age);
+    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
 }
 
 bool host_wifi_take_changed(void) {

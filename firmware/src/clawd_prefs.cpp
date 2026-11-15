@@ -6,6 +6,7 @@
 #include "hal/power_hal.h"
 #include <Preferences.h>
 #include <Arduino.h>
+#include <string.h>
 
 void clawd_prefs_init(void) {
     Preferences prefs;
@@ -90,3 +91,21 @@ void battery_care_set(int mode) {
     Serial.printf("Battery care: %s\n", mode == 0 ? "full charge" : mode == 1 ? "4.1 V" : "stop at 95 %");
     if (!first) save("bat_care", (uint8_t)mode);
 }
+
+// Boot statistics: the one NVS write every boot makes (never more often).
+static unsigned long boots = 0, crashes = 0;
+
+void boot_stats_init(const char* reset_reason) {
+    const bool crash = strcmp(reset_reason, "panic") == 0 || strcmp(reset_reason, "wdt") == 0 ||
+                       strcmp(reset_reason, "brownout") == 0;
+    Preferences prefs;
+    prefs.begin("clawdmeter", false);
+    boots = prefs.getULong("boots", 0) + 1;
+    crashes = prefs.getULong("crashes", 0) + (crash ? 1 : 0);
+    prefs.putULong("boots", boots);
+    if (crash) prefs.putULong("crashes", crashes);
+    prefs.end();
+}
+
+unsigned long boot_count(void) { return boots; }
+unsigned long crash_count(void) { return crashes; }
