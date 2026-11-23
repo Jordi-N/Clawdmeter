@@ -780,6 +780,28 @@ void loop() {
         usb_seen = false;
         Serial.println("USB: cable unplugged, app detached");
     }
+    // The PC turned off: USB power gone and no app on any link for a minute
+    // means power off, instead of draining the battery overnight. USB power
+    // coming back turns the board on again (AXP2101: power-on source "vbus").
+    // The cable pulled with the PC on keeps it up: the app follows over WiFi
+    // or Bluetooth. Armed only by a plugged-to-unplugged edge, so a board
+    // started on battery with its button stays on.
+    {
+        static bool armed = false;
+        static uint32_t alone_since = 0;   // no USB power and no app since; 0 = not
+        if (last_vbus && !vbus) armed = true;
+        if (vbus) armed = false;
+        const bool app = usb_host() || host_wifi_client() || ble_get_state() == BLE_STATE_CONNECTED;
+        if (!armed || app) {
+            alone_since = 0;
+        } else if (alone_since == 0) {
+            alone_since = millis() | 1;   // never 0
+        } else if (millis() - alone_since >= 60000) {
+            Serial.println("Power: no USB power and no app for 60 s (the PC is off)");
+            armed = false;   // a board that can't power off doesn't ask every loop
+            power_hal_shutdown();
+        }
+    }
     if (bat_changed) {
         if (pct != last_pct) ble_set_battery_level(pct);
         last_pct = pct;
