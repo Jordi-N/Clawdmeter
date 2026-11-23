@@ -31,6 +31,14 @@ static int      cached_mv         = -1;     // battery voltage, -1 = no battery
 static int      chg_state         = -1;     // xpowers_chg_status_t, -1 = not read yet
 static int      low_logged        = 0;      // 1 low, 2 critical: each logged once until USB returns
 
+// The PC turned off (or the cable came out): a minute after USB power goes,
+// the board powers off instead of draining the battery overnight. The
+// AXP2101 turns it back on when USB power returns (power-on source "vbus").
+// Only after a plugged-to-unplugged edge: started on battery with the
+// button, it stays on.
+#define USB_GONE_OFF_MS 60000
+static uint32_t usb_gone_ms = 0;   // when USB power went; 0 = present, or never seen
+
 #define BAT_LOW_MV  3400   // roughly the last 5-10 %
 #define BAT_CRIT_MV 3300   // brownout territory under radio/panel load
 
@@ -154,6 +162,15 @@ void power_hal_tick(void) {
         cached_charging = pmu.isCharging();
         cached_vbus     = pmu.isVbusIn();
         if (cached_vbus != vbus_was) log_transitions(vbus_was);
+        if (cached_vbus) usb_gone_ms = 0;
+        else if (vbus_was) usb_gone_ms = now | 1;   // never 0
+    }
+    if (usb_gone_ms && now - usb_gone_ms >= USB_GONE_OFF_MS) {
+        Serial.printf("Power: no USB power for %d s, shutting down (battery %d %% %d mV)\n",
+                      USB_GONE_OFF_MS / 1000, cached_pct, cached_mv);
+        Serial.flush();
+        pmu.shutdown();
+        usb_gone_ms = 0;   // if the PMU ignored it, don't ask every loop
     }
     if (now - last_battery_ms >= BATTERY_POLL_MS) {
         last_battery_ms = now;
