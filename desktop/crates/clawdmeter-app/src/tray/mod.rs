@@ -24,6 +24,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use crate::art::{tray_icon_rgba, TrayState};
 use crate::daemon::{self, Command, DaemonHandle};
 use crate::ipc::{self, AppCommand, StatusSnapshot};
+use crate::power_off;
 use crate::{ago, tilde, Page};
 
 /// Status file refresh even when nothing changed (windows use it as a
@@ -68,6 +69,9 @@ struct Items {
     weekly: MenuItem,
     refresh: MenuItem,
     mute: CheckMenuItem,
+    /// One-shot: power the computer off when a usage limit runs out.
+    power_off: CheckMenuItem,
+    cancel_off: MenuItem,
     open: MenuItem,
     update: MenuItem,
     settings: MenuItem,
@@ -84,6 +88,8 @@ impl Items {
             weekly: MenuItem::new("Semana  –", false, None),
             refresh: MenuItem::new("Actualizar uso", true, None),
             mute: CheckMenuItem::new("Silenciar sonidos", true, false, None),
+            power_off: CheckMenuItem::new("Apagar el PC al agotar el límite", true, false, None),
+            cancel_off: MenuItem::new("Cancelar el apagado", false, None),
             open: MenuItem::new("Abrir Clawdmeter", true, None),
             update: MenuItem::new("Grabar firmware…", true, None),
             settings: MenuItem::new("Ajustes…", true, None),
@@ -98,6 +104,8 @@ impl Items {
             &PredefinedMenuItem::separator(),
             &it.refresh,
             &it.mute,
+            &it.power_off,
+            &it.cancel_off,
             &PredefinedMenuItem::separator(),
             &it.open,
             &it.update,
@@ -184,6 +192,11 @@ struct TrayApp {
     check_now: Arc<AtomicBool>,
     settings: Settings,
     settings_at: i64,
+    /// When "Apagar el PC al agotar el límite" was ticked (only readings
+    /// after it count). Not saved: an app restart disarms it.
+    power_off_armed: Option<i64>,
+    /// A scheduled shutdown's time, while it can still be cancelled.
+    power_off_at: Option<i64>,
 }
 
 impl TrayApp {
@@ -232,6 +245,50 @@ impl TrayApp {
         true
     }
 
+    fn set_power_off_armed(&mut self, armed: bool, now: i64) {
+        self.power_off_armed = armed.then_some(now);
+        log::info!("auto power-off {}", if armed { "armed" } else { "disarmed" });
+    }
+
+    fn cancel_power_off(&mut self) {
+        self.power_off_at = None;
+        if let Some(items) = &self.items {
+            items.cancel_off.set_enabled(false);
+        }
+        match power_off::cancel_command().map(power_off::run) {
+            Some(Ok(())) => log::info!("auto power-off: shutdown cancelled"),
+            Some(Err(e)) => log::warn!("auto power-off: couldn't cancel the shutdown: {e}"),
+            None => {}
+        }
+    }
+
+    /// Armed and a fresh reading says a limit ran out: schedule the shutdown
+    /// and disarm (one-shot).
+    fn check_power_off(&mut self, snap: &StatusSnapshot, now: i64) {
+        if self.power_off_at.is_some_and(|t| now >= t) {
+            self.power_off_at = None;
+            if let Some(items) = &self.items {
+                items.cancel_off.set_enabled(false);
+            }
+        }
+        let Some(why) = self.power_off_armed.and_then(|at| power_off::limit_hit(snap, at)) else { return };
+        self.power_off_armed = None;
+        if let Some(items) = &self.items {
+            items.power_off.set_checked(false);
+        }
+        match power_off::schedule_command(why).map(power_off::run) {
+            Some(Ok(())) => {
+                log::warn!("auto power-off: {why} ran out; shutting down in {} s", power_off::DELAY_SECS);
+                self.power_off_at = Some(now + power_off::DELAY_SECS);
+                if let Some(items) = &self.items {
+                    items.cancel_off.set_enabled(true);
+                }
+            }
+            Some(Err(e)) => log::error!("auto power-off: couldn't schedule the shutdown: {e}"),
+            None => log::warn!("auto power-off: not supported on this system"),
+        }
+    }
+
     fn snapshot(&self, now: i64) -> StatusSnapshot {
         let status = self.daemon.as_ref().map(|d| d.status.borrow().clone()).unwrap_or_default();
         let mut snap = StatusSnapshot::from_status(&status, now);
@@ -256,6 +313,15 @@ impl TrayApp {
         while let Ok(ev) = MenuEvent::receiver().try_recv() {
             let Some(items) = &self.items else { continue };
             let id = ev.id;
+            if id == *items.power_off.id() {
+                let armed = items.power_off.is_checked();
+                self.set_power_off_armed(armed, now);
+                continue;
+            }
+            if id == *items.cancel_off.id() {
+                self.cancel_power_off();
+                continue;
+            }
             let cmd = if id == *items.refresh.id() {
                 Some(AppCommand::Refresh)
             } else if id == *items.mute.id() {
@@ -300,6 +366,7 @@ impl TrayApp {
             self.device_firmware = ipc::load_firmware_record(&self.paths).map(|r| r.ver);
         }
         let snap = self.snapshot(now);
+        self.check_power_off(&snap, now);
         let state = snap.tray_state();
         if self.shown_state != Some(state) {
             if let Some(t) = &self.tray {
@@ -519,6 +586,8 @@ fn run_locked(paths: Paths, _lock: Option<std::fs::File>) -> i32 {
         check_now,
         settings,
         settings_at: unix_now(),
+        power_off_armed: None,
+        power_off_at: None,
     };
     // First run opens the setup wizard; without a tray the window is the app.
     if crate::onboarding::needed(&app.paths) {

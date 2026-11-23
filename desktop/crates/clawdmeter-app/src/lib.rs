@@ -20,6 +20,7 @@ pub mod ipc;
 pub mod keys;
 pub mod logger;
 pub mod onboarding;
+pub mod power_off;
 pub mod self_update;
 pub mod session;
 pub mod transport;
